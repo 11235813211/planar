@@ -1,99 +1,259 @@
 {
   "schemaVersion": 1,
   "project": {
-    "name": "Example Project",
+    "name": "Helio App Launch",
     "timeUnit": "day"
   },
   "people": [
-    {
-      "id": "p_alice",
-      "name": "Alice Chen"
-    },
-    {
-      "id": "p_bob",
-      "name": "Bob Ruiz"
-    }
+    { "id": "p_alice", "name": "Alice Chen" },
+    { "id": "p_bob",   "name": "Bob Ruiz" },
+    { "id": "p_carol", "name": "Carol Kim" },
+    { "id": "p_dave",  "name": "Dave Park" },
+    { "id": "p_eve",   "name": "Eve Martinez" }
+  ],
+  "columns": [
+    { "id": "todo",        "label": "To Do",       "order": "a0" },
+    { "id": "in-progress", "label": "In Progress",  "order": "a1" },
+    { "id": "review",      "label": "In Review",    "order": "a2" },
+    { "id": "done",        "label": "Done",         "order": "a3" }
   ],
   "tasks": [
     {
-      "id": "t_root_design",
-      "name": "Design Phase",
-      "type": "task",
-      "parent": null,
-      "order": "a0",
-      "timeMode": "date",
-      "start": "2026-09-01",
-      "end": "2026-12-01",
-      "prerequisites": [],
-      "assignees": [
-        "p_alice"
-      ],
-      "status": "in-progress",
-      "ticket": null,
-      "style": {
-        "background": "#0B3D2E",
-        "text": "#E8FFF4"
-      }
+      "id": "t_discovery", "name": "Discovery", "type": "task",
+      "parent": null, "order": "a0",
+      "timeMode": "date", "start": "2026-09-01", "end": "2026-09-26",
+      "prerequisites": [], "assignees": ["p_alice"],
+      "status": "todo", "ticket": null,
+      "style": { "background": "#1e3a5f", "text": "#dbeafe" }
     },
     {
-      "id": "t_cad",
-      "name": "CAD Model",
-      "type": "task",
-      "parent": "t_root_design",
-      "order": "a0",
-      "timeMode": "date",
-      "start": "2026-09-01",
-      "end": "2026-09-20",
-      "prerequisites": [],
-      "assignees": [
-        "p_alice"
-      ],
-      "status": "done",
-      "ticket": "ENG-101",
-      "style": {
-        "background": "#12324A",
-        "text": "#DCEEFF"
-      }
+      "id": "m_kickoff", "name": "Kickoff", "type": "milestone",
+      "parent": null, "order": "a1",
+      "timeMode": "date", "date": "2026-09-29",
+      "terminates": "t_discovery", "generated": true,
+      "prerequisites": ["t_discovery"],
+      "style": { "background": "#5A2D82", "text": "#FFFFFF" }
     },
     {
-      "id": "t_fea",
-      "name": "Run FEA",
-      "type": "task",
-      "parent": "t_root_design",
-      "order": "a1",
-      "timeMode": "duration",
-      "duration": 30,
-      "start": "2026-09-21",
-      "prerequisites": [
-        "t_cad"
-      ],
-      "assignees": [
-        "p_bob"
-      ],
-      "status": "todo",
-      "ticket": "ENG-142",
-      "style": {
-        "background": "#001100",
-        "text": "#FFBBFF"
-      }
+      "id": "t_design", "name": "Design & UX", "type": "task",
+      "parent": null, "order": "a2",
+      "timeMode": "date", "start": "2026-09-30", "end": "2026-11-14",
+      "prerequisites": ["m_kickoff"], "assignees": ["p_carol"],
+      "status": "todo", "ticket": null,
+      "style": { "background": "#3b0764", "text": "#ede9fe" }
     },
     {
-      "id": "m_design_done",
-      "name": "Design Complete",
-      "type": "milestone",
-      "parent": null,
-      "order": "a1",
-      "timeMode": "date",
-      "date": "2026-12-01",
-      "terminates": "t_root_design",
-      "generated": true,
-      "prerequisites": [
-        "t_root_design"
-      ],
-      "style": {
-        "background": "#5A2D82",
-        "text": "#FFFFFF"
-      }
+      "id": "t_engineering", "name": "Engineering", "type": "task",
+      "parent": null, "order": "a3",
+      "timeMode": "date", "start": "2026-09-30", "end": "2026-12-11",
+      "prerequisites": ["m_kickoff"], "assignees": ["p_bob", "p_dave"],
+      "status": "todo", "ticket": null,
+      "style": { "background": "#052e16", "text": "#d1fae5" }
+    },
+    {
+      "id": "m_feature_complete", "name": "Feature Complete", "type": "milestone",
+      "parent": null, "order": "a4",
+      "timeMode": "date", "date": "2026-12-15",
+      "terminates": "t_engineering", "generated": true,
+      "prerequisites": ["t_design", "t_engineering"],
+      "style": { "background": "#5A2D82", "text": "#FFFFFF" }
+    },
+    {
+      "id": "t_launch_prep", "name": "Launch Prep", "type": "task",
+      "parent": null, "order": "a5",
+      "timeMode": "date", "start": "2026-12-16", "end": "2027-01-23",
+      "prerequisites": ["m_feature_complete"], "assignees": ["p_alice", "p_eve"],
+      "status": "todo", "ticket": null,
+      "style": { "background": "#450a0a", "text": "#fee2e2" }
+    },
+    {
+      "id": "m_launch", "name": "Launch", "type": "milestone",
+      "parent": null, "order": "a6",
+      "timeMode": "date", "date": "2027-01-26",
+      "terminates": "t_launch_prep", "generated": true,
+      "prerequisites": ["t_launch_prep"],
+      "style": { "background": "#7c3aed", "text": "#FFFFFF" }
+    },
+
+    {
+      "id": "t_mkt_research", "name": "Market Research", "type": "task",
+      "parent": "t_discovery", "order": "a0",
+      "timeMode": "duration", "duration": 10, "start": "2026-09-01",
+      "prerequisites": [], "assignees": ["p_alice"],
+      "status": "todo", "ticket": "DIS-01",
+      "style": { "background": "#1e3a5f", "text": "#dbeafe" }
+    },
+    {
+      "id": "t_comp_analysis", "name": "Competitive Analysis", "type": "task",
+      "parent": "t_discovery", "order": "a1",
+      "timeMode": "duration", "duration": 8, "start": "2026-09-11",
+      "prerequisites": ["t_mkt_research"], "assignees": ["p_alice"],
+      "status": "todo", "ticket": "DIS-02",
+      "style": { "background": "#1e3a5f", "text": "#dbeafe" }
+    },
+    {
+      "id": "t_user_interviews", "name": "User Interviews", "type": "task",
+      "parent": "t_discovery", "order": "a2",
+      "timeMode": "duration", "duration": 12, "start": "2026-09-11",
+      "prerequisites": ["t_mkt_research"], "assignees": ["p_alice", "p_carol"],
+      "status": "todo", "ticket": "DIS-03",
+      "style": { "background": "#1e3a5f", "text": "#dbeafe" }
+    },
+    {
+      "id": "t_requirements", "name": "Requirements Doc", "type": "task",
+      "parent": "t_discovery", "order": "a3",
+      "timeMode": "duration", "duration": 5, "start": "2026-09-23",
+      "prerequisites": ["t_comp_analysis", "t_user_interviews"], "assignees": ["p_alice"],
+      "status": "todo", "ticket": "DIS-04",
+      "style": { "background": "#1e3a5f", "text": "#dbeafe" }
+    },
+
+    {
+      "id": "t_wireframes", "name": "Wireframes", "type": "task",
+      "parent": "t_design", "order": "a0",
+      "timeMode": "duration", "duration": 14, "start": "2026-09-30",
+      "prerequisites": [], "assignees": ["p_carol"],
+      "status": "todo", "ticket": "DES-01",
+      "style": { "background": "#3b0764", "text": "#ede9fe" }
+    },
+    {
+      "id": "t_visual_design", "name": "Visual Design", "type": "task",
+      "parent": "t_design", "order": "a1",
+      "timeMode": "duration", "duration": 21, "start": "2026-10-14",
+      "prerequisites": ["t_wireframes"], "assignees": ["p_carol"],
+      "status": "todo", "ticket": "DES-02",
+      "style": { "background": "#3b0764", "text": "#ede9fe" }
+    },
+    {
+      "id": "t_prototype", "name": "Interactive Prototype", "type": "task",
+      "parent": "t_design", "order": "a2",
+      "timeMode": "duration", "duration": 10, "start": "2026-10-14",
+      "prerequisites": ["t_wireframes"], "assignees": ["p_carol", "p_bob"],
+      "status": "todo", "ticket": "DES-03",
+      "style": { "background": "#3b0764", "text": "#ede9fe" }
+    },
+    {
+      "id": "t_design_review", "name": "Design Review", "type": "task",
+      "parent": "t_design", "order": "a3",
+      "timeMode": "duration", "duration": 5, "start": "2026-11-04",
+      "prerequisites": ["t_visual_design", "t_prototype"], "assignees": ["p_alice", "p_carol"],
+      "status": "todo", "ticket": "DES-04",
+      "style": { "background": "#3b0764", "text": "#ede9fe" }
+    },
+    {
+      "id": "t_assets", "name": "Asset Export", "type": "task",
+      "parent": "t_design", "order": "a4",
+      "timeMode": "duration", "duration": 5, "start": "2026-11-09",
+      "prerequisites": ["t_design_review"], "assignees": ["p_carol"],
+      "status": "todo", "ticket": "DES-05",
+      "style": { "background": "#3b0764", "text": "#ede9fe" }
+    },
+
+    {
+      "id": "t_arch", "name": "Architecture", "type": "task",
+      "parent": "t_engineering", "order": "a0",
+      "timeMode": "duration", "duration": 7, "start": "2026-09-30",
+      "prerequisites": [], "assignees": ["p_bob"],
+      "status": "todo", "ticket": "ENG-01",
+      "style": { "background": "#052e16", "text": "#d1fae5" }
+    },
+    {
+      "id": "t_db", "name": "Database Schema", "type": "task",
+      "parent": "t_engineering", "order": "a1",
+      "timeMode": "duration", "duration": 10, "start": "2026-10-07",
+      "prerequisites": ["t_arch"], "assignees": ["p_bob"],
+      "status": "todo", "ticket": "ENG-02",
+      "style": { "background": "#052e16", "text": "#d1fae5" }
+    },
+    {
+      "id": "t_api", "name": "API Development", "type": "task",
+      "parent": "t_engineering", "order": "a2",
+      "timeMode": "duration", "duration": 21, "start": "2026-10-07",
+      "prerequisites": ["t_arch"], "assignees": ["p_bob", "p_dave"],
+      "status": "todo", "ticket": "ENG-03",
+      "style": { "background": "#052e16", "text": "#d1fae5" }
+    },
+    {
+      "id": "t_auth", "name": "Authentication", "type": "task",
+      "parent": "t_engineering", "order": "a3",
+      "timeMode": "duration", "duration": 14, "start": "2026-10-17",
+      "prerequisites": ["t_db"], "assignees": ["p_dave"],
+      "status": "todo", "ticket": "ENG-04",
+      "style": { "background": "#052e16", "text": "#d1fae5" }
+    },
+    {
+      "id": "t_core_features", "name": "Core Features", "type": "task",
+      "parent": "t_engineering", "order": "a4",
+      "timeMode": "duration", "duration": 28, "start": "2026-10-28",
+      "prerequisites": ["t_api", "t_auth"], "assignees": ["p_bob", "p_dave"],
+      "status": "todo", "ticket": "ENG-05",
+      "style": { "background": "#052e16", "text": "#d1fae5" }
+    },
+    {
+      "id": "t_ui_impl", "name": "UI Implementation", "type": "task",
+      "parent": "t_engineering", "order": "a5",
+      "timeMode": "duration", "duration": 21, "start": "2026-11-25",
+      "prerequisites": ["t_core_features"], "assignees": ["p_bob"],
+      "status": "todo", "ticket": "ENG-06",
+      "style": { "background": "#052e16", "text": "#d1fae5" }
+    },
+    {
+      "id": "t_integration", "name": "Integration & Polish", "type": "task",
+      "parent": "t_engineering", "order": "a6",
+      "timeMode": "duration", "duration": 10, "start": "2026-12-01",
+      "prerequisites": ["t_ui_impl"], "assignees": ["p_bob", "p_dave"],
+      "status": "todo", "ticket": "ENG-07",
+      "style": { "background": "#052e16", "text": "#d1fae5" }
+    },
+
+    {
+      "id": "t_qa_testing", "name": "QA Testing", "type": "task",
+      "parent": "t_launch_prep", "order": "a0",
+      "timeMode": "duration", "duration": 14, "start": "2026-12-16",
+      "prerequisites": [], "assignees": ["p_dave"],
+      "status": "todo", "ticket": "QA-01",
+      "style": { "background": "#450a0a", "text": "#fee2e2" }
+    },
+    {
+      "id": "t_bug_fixes", "name": "Bug Fixes", "type": "task",
+      "parent": "t_launch_prep", "order": "a1",
+      "timeMode": "duration", "duration": 10, "start": "2026-12-30",
+      "prerequisites": ["t_qa_testing"], "assignees": ["p_bob", "p_dave"],
+      "status": "todo", "ticket": "QA-02",
+      "style": { "background": "#450a0a", "text": "#fee2e2" }
+    },
+    {
+      "id": "t_copywriting", "name": "Copywriting", "type": "task",
+      "parent": "t_launch_prep", "order": "a2",
+      "timeMode": "duration", "duration": 10, "start": "2026-12-16",
+      "prerequisites": [], "assignees": ["p_eve"],
+      "status": "todo", "ticket": "MKT-01",
+      "style": { "background": "#450a0a", "text": "#fee2e2" }
+    },
+    {
+      "id": "t_social_media", "name": "Social Campaign", "type": "task",
+      "parent": "t_launch_prep", "order": "a3",
+      "timeMode": "duration", "duration": 14, "start": "2026-12-26",
+      "prerequisites": ["t_copywriting"], "assignees": ["p_eve"],
+      "status": "todo", "ticket": "MKT-02",
+      "style": { "background": "#450a0a", "text": "#fee2e2" }
+    },
+    {
+      "id": "t_press_kit", "name": "Press Kit", "type": "task",
+      "parent": "t_launch_prep", "order": "a4",
+      "timeMode": "duration", "duration": 7, "start": "2026-12-26",
+      "prerequisites": ["t_copywriting"], "assignees": ["p_eve"],
+      "status": "todo", "ticket": "MKT-03",
+      "style": { "background": "#450a0a", "text": "#fee2e2" }
+    },
+    {
+      "id": "t_launch_event", "name": "Launch Event", "type": "task",
+      "parent": "t_launch_prep", "order": "a5",
+      "timeMode": "duration", "duration": 7, "start": "2027-01-09",
+      "prerequisites": ["t_bug_fixes", "t_social_media", "t_press_kit"],
+      "assignees": ["p_alice", "p_eve"],
+      "status": "todo", "ticket": "MKT-04",
+      "style": { "background": "#450a0a", "text": "#fee2e2" }
     }
   ]
 }

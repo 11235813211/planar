@@ -1,5 +1,6 @@
-import type { GanttFile, AnyTask, NodeId, Person, Project, RuntimeTask, KanbanColumn } from '../types'
+import type { GanttFile, AnyTask, NodeId, Person, Project, RuntimeTask, KanbanColumn, TicketTask, MilestoneTask } from '../types'
 import { validate } from './validator'
+import { newTaskId, newMilestone } from './ids'
 
 function defaultColumns(): KanbanColumn[] {
   return [
@@ -51,6 +52,42 @@ export function parseGanttFile(json: string): Project {
     columns: file.columns ?? defaultColumns(),
     fileHandle: null,
     dirty: false,
+  }
+}
+
+export function createBlankProject(): Project {
+  const today = new Date().toISOString().split('T')[0]
+  const tid = newTaskId()
+  const mid = newMilestone()
+
+  const rawTask: TicketTask = {
+    id: tid, name: 'First Task', type: 'task',
+    parent: null, order: 'a0',
+    timeMode: 'duration', duration: 14, start: today,
+    prerequisites: [], assignees: [],
+    status: 'todo', ticket: null,
+    style: { background: '#1e3a5f', text: '#dbeafe' },
+  }
+  const rawMs: MilestoneTask = {
+    id: mid, name: 'Milestone', type: 'milestone',
+    parent: null, order: 'a1',
+    timeMode: 'duration',
+    terminates: tid, generated: false,
+    prerequisites: [tid],
+    style: { background: '#5A2D82', text: '#FFFFFF' },
+  }
+
+  const taskRT: RuntimeTask = { raw: rawTask, children: [], computed: null }
+  const msRT: RuntimeTask   = { raw: rawMs,  children: [], computed: null }
+
+  return {
+    meta: { name: 'Untitled Project', timeUnit: 'day' },
+    people: new Map(),
+    tasks: new Map([[tid, taskRT], [mid, msRT]]),
+    roots: [taskRT, msRT],
+    columns: defaultColumns(),
+    fileHandle: null,
+    dirty: true,
   }
 }
 
