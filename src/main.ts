@@ -145,7 +145,7 @@ async function init() {
   })
 
   document.getElementById('su-example')!.addEventListener('click', async () => {
-    const resp = await fetch(`${import.meta.env.BASE_URL}example.gantt.json`)
+    const resp = await fetch(`${import.meta.env.BASE_URL}example.gantt.json`, { cache: 'no-cache' })
     const json = await resp.text()
     loadProject(parseGanttFile(json))
   })
