@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "project": {
+    "name": "Example Project",
+    "timeUnit": "day"
+  },
+  "people": [
+    {
+      "id": "p_alice",
+      "name": "Alice Chen"
+    },
+    {
+      "id": "p_bob",
+      "name": "Bob Ruiz"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "t_root_design",
+      "name": "Design Phase",
+      "type": "task",
+      "parent": null,
+      "order": "a0",
+      "timeMode": "date",
+      "start": "2026-09-01",
+      "end": "2026-12-01",
+      "prerequisites": [],
+      "assignees": [
+        "p_alice"
+      ],
+      "status": "in-progress",
+      "ticket": null,
+      "style": {
+        "background": "#0B3D2E",
+        "text": "#E8FFF4"
+      }
+    },
+    {
+      "id": "t_cad",
+      "name": "CAD Model",
+      "type": "task",
+      "parent": "t_root_design",
+      "order": "a0",
+      "timeMode": "date",
+      "start": "2026-09-01",
+      "end": "2026-09-20",
+      "prerequisites": [],
+      "assignees": [
+        "p_alice"
+      ],
+      "status": "done",
+      "ticket": "ENG-101",
+      "style": {
+        "background": "#12324A",
+        "text": "#DCEEFF"
+      }
+    },
+    {
+      "id": "t_fea",
+      "name": "Run FEA",
+      "type": "task",
+      "parent": "t_root_design",
+      "order": "a1",
+      "timeMode": "duration",
+      "duration": 30,
+      "start": "2026-09-21",
+      "prerequisites": [
+        "t_cad"
+      ],
+      "assignees": [
+        "p_bob"
+      ],
+      "status": "todo",
+      "ticket": "ENG-142",
+      "style": {
+        "background": "#001100",
+        "text": "#FFBBFF"
+      }
+    },
+    {
+      "id": "m_design_done",
+      "name": "Design Complete",
+      "type": "milestone",
+      "parent": null,
+      "order": "a1",
+      "timeMode": "date",
+      "date": "2026-12-01",
+      "terminates": "t_root_design",
+      "generated": true,
+      "prerequisites": [
+        "t_root_design"
+      ],
+      "style": {
+        "background": "#5A2D82",
+        "text": "#FFFFFF"
+      }
+    }
+  ]
+}
