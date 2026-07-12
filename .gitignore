@@ -4,3 +4,4 @@ dist/
 *.local
 
 .claude/
+e2e/shots/

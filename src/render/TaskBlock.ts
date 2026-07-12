@@ -3,23 +3,19 @@ import { renderAvatars } from './Avatar'
 import { TASK_HEIGHT } from '../engine/layout'
 
 const LABEL_FS  = 12
-const CHAR_W    = LABEL_FS * 0.58
 const SVGNS     = 'http://www.w3.org/2000/svg'
 
 function el<K extends keyof SVGElementTagNameMap>(tag: K): SVGElementTagNameMap[K] {
   return document.createElementNS(SVGNS, tag)
 }
 
-function fitText(text: string, availPx: number): string {
-  const max = Math.floor(availPx / CHAR_W)
-  if (max <= 1) return text.slice(0, 1)
-  return text.length <= max ? text : text.slice(0, Math.max(0, max - 1)) + '…'
+function fitChars(text: string, maxChars: number): string {
+  return text.length <= maxChars ? text : text.slice(0, Math.max(0, maxChars - 1)) + '…'
 }
 
 export interface TaskBlockHandlers {
-  onSelect: () => void
-  onOpen: () => void          // ticket → popup; container → drill in
-  onLabelClick: (labelEl: SVGTextElement) => void
+  onSelect: () => void        // single click → select + open edit popup
+  onOpen: () => void          // double click → drill in (containers only)
   onAddRight: () => void
   onAddLeft: () => void
 }
@@ -65,6 +61,7 @@ export function renderTaskBlock(
 
   // Background rect
   const rect = el('rect')
+  rect.classList.add('bar-rect')
   rect.setAttribute('x', String(x)); rect.setAttribute('y', String(y))
   rect.setAttribute('width', String(w)); rect.setAttribute('height', String(TASK_HEIGHT))
   rect.setAttribute('rx', '6')
@@ -92,21 +89,21 @@ export function renderTaskBlock(
     for (const a of renderAvatars(assignees, x, y, w, TASK_HEIGHT)) g.appendChild(a)
   }
 
-  // Name label BELOW the bar, left-aligned
+  // Name label ABOVE the bar, left-aligned. Because successors staircase down-and-right,
+  // the space above/right of each bar is free, so names can run their natural length
+  // (capped generously). Display-only — editing happens in the click popup.
   const prefix = raw.type === 'ticket' && raw.ticket ? `${raw.ticket}  ` : ''
-  const labelMaxW = Math.max(w, 96)
   const label = el('text')
   label.setAttribute('x', String(x + 1))
-  label.setAttribute('y', String(y + TASK_HEIGHT + 13))
+  label.setAttribute('y', String(y - 5))
   label.setAttribute('text-anchor', 'start')
   label.setAttribute('fill', '#334155')
   label.setAttribute('font-size', String(LABEL_FS))
-  label.setAttribute('font-weight', isContainer ? '600' : '400')
-  label.setAttribute('cursor', 'text')
+  label.setAttribute('font-weight', isContainer ? '600' : '500')
+  label.setAttribute('pointer-events', 'none')
   label.classList.add('task-label', 'task-name-label')
   label.setAttribute('data-id', raw.id)
-  label.textContent = fitText(prefix + raw.name, labelMaxW)
-  label.addEventListener('click', (e) => { e.stopPropagation(); h.onLabelClick(label) })
+  label.textContent = fitChars(prefix + raw.name, 44)   // cap ~44 chars
   g.appendChild(label)
 
   // Hover +/- buttons

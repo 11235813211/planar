@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "e2e:verify": "node e2e/verify.mjs",
+    "e2e:diagnose": "node e2e/diagnose.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",

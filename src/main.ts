@@ -5,7 +5,6 @@ import { serialize } from './data/serializer'
 import { schedule } from './engine/scheduler'
 import { GanttView } from './views/GanttView'
 import { KanbanView } from './views/KanbanView'
-import { FormatBar } from './views/FormatBar'
 import { openTagManager } from './views/TagManager'
 import { openFile, saveFile, tryReopenLast, requestPermission } from './persistence/fsa'
 import { loadHandle } from './persistence/idb'
@@ -15,7 +14,6 @@ import { loadHandle } from './persistence/idb'
 let project: Project | null = null
 let ganttView: GanttView | null = null
 let currentView: 'gantt' | 'kanban' = 'gantt'
-let formatBar: FormatBar | null = null
 
 // ─── Build shell ──────────────────────────────────────────────────────────────
 
@@ -33,7 +31,6 @@ function buildShell() {
       <button class="btn" id="btn-open">Open</button>
       <button class="btn" id="btn-save">Save</button>
     </div>
-    <div id="format-bar-wrap"></div>
     <div id="placement-banner" style="display:none"></div>
     <div id="breadcrumb" style="display:none"></div>
     <div id="canvas-wrap" style="display:none;flex:1;overflow:hidden;position:relative"></div>
@@ -48,8 +45,6 @@ function buildShell() {
       </div>
     </div>
   `
-
-  formatBar = new FormatBar(document.getElementById('format-bar-wrap')!)
 }
 
 // ─── Load project ─────────────────────────────────────────────────────────────
@@ -58,6 +53,7 @@ function loadProject(p: Project) {
   project = p
   const conflicts = schedule(project)
   if (conflicts.length) console.warn('Schedule conflicts:', conflicts)
+  ;(window as unknown as { __planar: Project }).__planar = project  // for e2e inspection
 
   document.getElementById('startup')!.style.display = 'none'
   const canvasWrap = document.getElementById('canvas-wrap')!
@@ -67,7 +63,7 @@ function loadProject(p: Project) {
 }
 
 function showView(view: 'gantt' | 'kanban') {
-  if (!project || !formatBar) return
+  if (!project) return
   currentView = view
   const canvasWrap = document.getElementById('canvas-wrap')!
 
@@ -79,10 +75,9 @@ function showView(view: 'gantt' | 'kanban') {
   canvasWrap.innerHTML = ''
 
   if (view === 'gantt') {
-    ganttView = new GanttView(canvasWrap, project, formatBar)
+    ganttView = new GanttView(canvasWrap, project)
   } else {
     ganttView = null
-    formatBar.selectTask(null)
     new KanbanView(canvasWrap, project)
   }
 }

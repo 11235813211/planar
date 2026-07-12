@@ -1,11 +1,10 @@
-import type { Project, NodeId, TaskId, LayoutNode, RuntimeTask, Milestone } from '../types'
+import type { Project, NodeId, TaskId, LayoutNode, RuntimeTask, Milestone, TicketTask, ContainerTask } from '../types'
 import { buildLayout, PX_PER_DAY, PANEL_V_PAD, SECTION_PAD } from '../engine/layout'
 import type { LayoutResult } from '../engine/layout'
 import { renderTaskBlock } from '../render/TaskBlock'
 import { renderMilestone } from '../render/MilestoneFlag'
 import { renderConnectors } from '../render/Connector'
-import { openDetailModal } from './DetailModal'
-import { FormatBar } from './FormatBar'
+import { EditPopup } from './EditPopup'
 import { schedule } from '../engine/scheduler'
 import { newTaskId, newMilestoneId } from '../data/ids'
 import { openAddTaskModal } from './AddTaskModal'
@@ -57,46 +56,6 @@ function coarseLabel(d: Date, u: Gran['coarse']): string {
     : String(d.getUTCFullYear())
 }
 
-// ─── Inline edit ──────────────────────────────────────────────────────────────
-
-function startInlineEdit(labelEl: SVGTextElement, rt: RuntimeTask, project: Project, onCommit: () => void) {
-  document.getElementById('inline-title-input')?.remove()
-  const r = labelEl.getBoundingClientRect()
-  const input = document.createElement('input')
-  input.id = 'inline-title-input'
-  input.value = rt.raw.name
-  input.style.cssText = [
-    'position:fixed', `left:${r.left - 4}px`, `top:${r.top - 4}px`,
-    `width:${Math.max(r.width + 20, 120)}px`, 'height:22px',
-    'font:12px system-ui,sans-serif', 'border:2px solid #2563eb', 'border-radius:4px',
-    'padding:0 4px', 'outline:none', 'z-index:300', 'background:#fff', 'color:#111',
-  ].join(';')
-  labelEl.style.display = 'none'
-  let done = false
-  const teardown = () => {
-    if (done) return
-    done = true
-    input.removeEventListener('blur', commit)   // detach first to avoid re-entrancy on remove
-    if (input.isConnected) input.remove()
-    labelEl.style.display = ''
-  }
-  const commit = () => {
-    if (done) return
-    const v = input.value.trim()
-    if (v) { rt.raw.name = v; project.dirty = true }
-    teardown(); onCommit()
-  }
-  const cancel = () => teardown()
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') commit()
-    if (e.key === 'Escape') cancel()
-    e.stopPropagation()
-  })
-  input.addEventListener('blur', commit)
-  document.body.appendChild(input)
-  input.focus(); input.select()
-}
-
 const orderAfter = (o: string) => o + 'm'
 
 // ─── GanttView ────────────────────────────────────────────────────────────────
@@ -109,7 +68,7 @@ export class GanttView {
   private panelBars: HTMLElement
 
   private project: Project
-  private formatBar: FormatBar
+  private popup: EditPopup
   private drillStack: Array<{ id: TaskId | null; label: string }> = []
   private drillId: TaskId | null = null
   private selectedId: NodeId | null = null
@@ -119,20 +78,19 @@ export class GanttView {
   private panY = 20
   private isPanning = false
   private last = { x: 0, y: 0 }
-  private pendingEditId: TaskId | null = null
+  private newlyCreatedId: TaskId | null = null
   private pickPrereqFor: NodeId | null = null
   private currentSectionStart: Date | null = null
   private dragPanelId: string | null = null
   private ro: ResizeObserver
 
-  constructor(container: HTMLElement, project: Project, formatBar: FormatBar) {
+  constructor(container: HTMLElement, project: Project) {
     this.container = container
     this.project = project
-    this.formatBar = formatBar
-    this.formatBar.bind(project, () => this.render())
 
     container.innerHTML = ''
     container.classList.add('gantt-root')
+    this.popup = new EditPopup(container)
 
     this.svg = el('svg')
     this.svg.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;user-select:none;'
@@ -158,7 +116,17 @@ export class GanttView {
     this.render()
   }
 
-  dispose() { this.ro.disconnect(); document.removeEventListener('keydown', this.onKeyDown) }
+  dispose() {
+    this.ro.disconnect()
+    document.removeEventListener('keydown', this.onKeyDown)
+    const c = this.container
+    c.removeEventListener('pointerdown', this.onPointerDown)
+    c.removeEventListener('pointermove', this.onPointerMove)
+    c.removeEventListener('pointerup', this.onPointerUp)
+    c.removeEventListener('pointercancel', this.onPointerUp)
+    c.removeEventListener('wheel', this.onWheel)
+    c.classList.remove('gantt-root', 'panning')
+  }
 
   private get dateBarH() { return DATE_BAR_BASE }   // constant; visually scaled by `zoom`
   private get W() { return this.container.clientWidth }
@@ -186,7 +154,8 @@ export class GanttView {
     bg.setAttribute('fill', 'transparent')
     bg.addEventListener('click', () => {
       if (this.pickPrereqFor) { this.pickPrereqFor = null; this.render(); return }
-      this.select(null)
+      if (this.popup.isOpen) this.closeEdit()
+      else this.select(null)
     })
     this.contentG.appendChild(bg)
 
@@ -196,12 +165,26 @@ export class GanttView {
     this.renderPanelBars(layout)
     this.applyTransform()
 
-    if (this.pendingEditId) {
-      const lbl = this.svg.querySelector<SVGTextElement>(`.task-name-label[data-id="${this.pendingEditId}"]`)
-      const rt = this.project.tasks.get(this.pendingEditId)
-      if (lbl && rt) startInlineEdit(lbl, rt, this.project, () => this.render())
-      this.pendingEditId = null
+    // A freshly created task auto-opens its editor.
+    if (this.newlyCreatedId) {
+      const id = this.newlyCreatedId; this.newlyCreatedId = null
+      if (this.project.tasks.has(id)) this.openEdit(id)
     }
+    // Keep an open popup anchored to its task (positions shift after edits/pan/zoom).
+    if (this.popup.isOpen) {
+      const id = this.popup.openFor!
+      const anchor = this.taskAnchor(id)
+      if (anchor) this.popup.reposition(anchor)
+      else this.closeEdit()
+    }
+  }
+
+  /** Screen-space anchor (below the bar) for a task's edit popup. */
+  private taskAnchor(id: string): { x: number; y: number; bottom: number } | null {
+    const rect = this.svg.querySelector<SVGRectElement>(`.task-block[data-id="${id}"] .bar-rect`)
+    if (!rect) return null
+    const r = rect.getBoundingClientRect()
+    return { x: r.left, y: r.top, bottom: r.bottom }
   }
 
   private renderPanel(panel: LayoutResult['panels'][number]) {
@@ -230,20 +213,12 @@ export class GanttView {
         g.appendChild(flag)
       } else {
         const block = renderTaskBlock(node, this.project, this.selectedId === node.id, {
-          onSelect: () => { if (this.pickPrereqFor) this.completePickPrereq(node.id); else this.select(node.id) },
+          // Single click → select + open the edit popup (works for both task types).
+          onSelect: () => { if (this.pickPrereqFor) this.completePickPrereq(node.id); else this.openEdit(node.id) },
+          // Double click → drill in (containers only; reserved for milestone-tasks).
           onOpen: () => {
             const rt = this.project.tasks.get(node.id)!
             if (rt.raw.type === 'container') this.drillInto(node.id, rt.raw.name)
-            else openDetailModal(rt, this.project, () => { schedule(this.project); this.render() })
-          },
-          onLabelClick: (lbl) => {
-            if (this.pickPrereqFor) { this.completePickPrereq(node.id); return }
-            // First click selects; clicking the label of an already-selected task renames it.
-            if (this.selectedId === node.id) {
-              startInlineEdit(lbl, this.project.tasks.get(node.id)!, this.project, () => { schedule(this.project); this.render() })
-            } else {
-              this.select(node.id)
-            }
           },
           onAddRight: () => this.promptAddTask(node.id, 'after'),
           onAddLeft: () => this.promptAddTask(node.id, 'before'),
@@ -402,44 +377,44 @@ export class GanttView {
     if (this.currentSectionStart) this.renderAxis(this.currentSectionStart)
   }
 
+  // Handlers are stored as fields so dispose() can remove them — the container
+  // (#canvas-wrap) is shared/reused across views, so leaked listeners (esp. the
+  // pointer-capture on pointerdown) would otherwise swallow clicks in other views.
+  private onPointerDown = (e: PointerEvent) => {
+    if ((e.target as Element).closest('.task-block, .milestone-flag, .add-btn')) return
+    if (this.pickPrereqFor) return
+    this.isPanning = true; this.last = { x: e.clientX, y: e.clientY }
+    this.container.classList.add('panning'); this.container.setPointerCapture(e.pointerId)
+  }
+  private onPointerMove = (e: PointerEvent) => {
+    if (!this.isPanning) return
+    this.panX += e.clientX - this.last.x
+    this.panY += e.clientY - this.last.y
+    this.last = { x: e.clientX, y: e.clientY }
+    this.lightPan()
+  }
+  private onPointerUp = () => { this.isPanning = false; this.container.classList.remove('panning') }
+  private onWheel = (e: WheelEvent) => {
+    e.preventDefault()
+    const rect = this.svg.getBoundingClientRect()
+    const cursorX = e.clientX - rect.left
+    const cursorY = e.clientY - rect.top
+    if (e.ctrlKey || e.metaKey) {
+      this.applyUniformZoom(Math.exp(-e.deltaY * 0.0022), cursorX, cursorY)
+    } else if (e.shiftKey) {
+      this.applyTimeZoom(Math.exp(-e.deltaY * 0.0018), cursorX)
+    } else {
+      this.panX -= e.deltaX; this.panY -= e.deltaY; this.lightPan()
+    }
+  }
+
   private bindEvents() {
     const c = this.container
-    c.addEventListener('pointerdown', (e) => {
-      if ((e.target as Element).closest('.task-block, .milestone-flag, .add-btn')) return
-      if (this.pickPrereqFor) return
-      this.isPanning = true; this.last = { x: e.clientX, y: e.clientY }
-      c.classList.add('panning'); c.setPointerCapture(e.pointerId)
-    })
-    c.addEventListener('pointermove', (e) => {
-      if (!this.isPanning) return
-      this.panX += e.clientX - this.last.x
-      this.panY += e.clientY - this.last.y
-      this.last = { x: e.clientX, y: e.clientY }
-      this.lightPan()
-    })
-    const end = () => { this.isPanning = false; c.classList.remove('panning') }
-    c.addEventListener('pointerup', end)
-    c.addEventListener('pointercancel', end)
-
-    c.addEventListener('wheel', (e) => {
-      e.preventDefault()
-      const rect = this.svg.getBoundingClientRect()
-      const cursorX = e.clientX - rect.left
-      const cursorY = e.clientY - rect.top
-      if (e.ctrlKey || e.metaKey) {
-        // Uniform zoom (all directions) around the cursor — pinch / Ctrl+wheel.
-        this.applyUniformZoom(Math.exp(-e.deltaY * 0.0022), cursorX, cursorY)
-      } else if (e.shiftKey) {
-        // Time-only zoom (horizontal density) around the cursor.
-        this.applyTimeZoom(Math.exp(-e.deltaY * 0.0018), cursorX)
-      } else {
-        // Pan both axes (trackpad gives x+y; mouse-wheel gives y).
-        this.panX -= e.deltaX
-        this.panY -= e.deltaY
-        this.lightPan()
-      }
-    }, { passive: false })
-
+    c.addEventListener('pointerdown', this.onPointerDown)
+    c.addEventListener('pointermove', this.onPointerMove)
+    c.addEventListener('pointerup', this.onPointerUp)
+    c.addEventListener('pointercancel', this.onPointerUp)
+    c.addEventListener('wheel', this.onWheel, { passive: false })
     document.addEventListener('keydown', this.onKeyDown)
   }
 
@@ -473,6 +448,7 @@ export class GanttView {
   private onKeyDown = (e: KeyboardEvent) => {
     if (e.key === 'Escape') {
       if (this.pickPrereqFor) { this.pickPrereqFor = null; this.render() }
+      else if (this.popup.isOpen) this.closeEdit()
       else if (this.selectedId) this.select(null)
     }
     // Cmd/Ctrl +/- → uniform zoom in/out (centred on the viewport).
@@ -495,23 +471,103 @@ export class GanttView {
     this.selectedId = id
     this.contentG.querySelectorAll('.task-block.selected').forEach(e => e.classList.remove('selected'))
     if (id) this.contentG.querySelector(`.task-block[data-id="${id}"]`)?.classList.add('selected')
-    const rt = id ? this.project.tasks.get(id) ?? null : null
-    this.formatBar.selectTask(rt)
+  }
+
+  // ─── Edit popup ────────────────────────────────────────────────────────────────
+
+  private openEdit(id: TaskId) {
+    const rt = this.project.tasks.get(id)
+    if (!rt) return
+    this.select(id)
+    const anchor = this.taskAnchor(id)
+    if (!anchor) return
+    this.popup.open(rt, this.project, anchor, {
+      onChange: () => { this.project.dirty = true; schedule(this.project); this.render() },
+      onConvert: (to) => this.convertType(id, to),
+      onDelete: () => this.deleteTask(id),
+      onClose: () => this.closeEdit(),
+    })
+  }
+
+  private closeEdit() {
+    this.popup.close()
+    this.select(null)
+  }
+
+  private convertType(id: TaskId, to: 'ticket' | 'container') {
+    const rt = this.project.tasks.get(id)
+    if (!rt || rt.raw.type === to) return
+    if (to === 'ticket' && rt.children.length > 0) {
+      alert('This milestone-task has sub-tasks. Remove or move them before converting it to a ticket.')
+      return
+    }
+    const b = rt.raw
+    if (to === 'container') {
+      const c: ContainerTask = {
+        id: b.id, name: b.name, type: 'container', parent: b.parent, panel: b.panel,
+        order: b.order, prerequisites: b.prerequisites, tags: b.tags, style: b.style,
+        timeMode: b.timeMode, start: b.start, end: b.end, duration: b.duration,
+      }
+      rt.raw = c
+    } else {
+      const t: TicketTask = {
+        id: b.id, name: b.name, type: 'ticket', parent: b.parent, panel: b.panel,
+        order: b.order, prerequisites: b.prerequisites, tags: b.tags, style: b.style,
+        timeMode: b.timeMode, start: b.start, end: b.end, duration: b.duration ?? 7,
+        assignees: [], status: this.project.columns[0]?.id ?? 'todo', ticket: null,
+      }
+      rt.raw = t
+    }
+    this.project.dirty = true
+    schedule(this.project)
+    this.render()
+    this.openEdit(id)   // reopen with the new type's fields
+  }
+
+  private deleteTask(id: TaskId) {
+    const rt = this.project.tasks.get(id)
+    if (!rt) return
+    // Rewire: successors that depended on this task inherit its prerequisites.
+    const inherited = rt.raw.prerequisites
+    for (const other of this.project.tasks.values()) {
+      if (other.raw.prerequisites.includes(id)) {
+        other.raw.prerequisites = other.raw.prerequisites.flatMap(p => p === id ? inherited : [p])
+          .filter((p, i, a) => a.indexOf(p) === i && p !== other.raw.id)
+      }
+    }
+    for (const m of this.project.milestones.values()) {
+      if (m.raw.prerequisites.includes(id))
+        m.raw.prerequisites = m.raw.prerequisites.filter(p => p !== id)
+    }
+    // Remove from sibling array + map (and any children recursively).
+    const removeRec = (t: RuntimeTask) => {
+      for (const c of [...t.children]) removeRec(c)
+      this.project.tasks.delete(t.raw.id)
+    }
+    const siblings = this.siblingsOf(id)
+    const idx = siblings.findIndex(s => s.raw.id === id)
+    if (idx >= 0) siblings.splice(idx, 1)
+    removeRec(rt)
+
+    this.project.dirty = true
+    this.closeEdit()
+    schedule(this.project)
+    this.render()
   }
 
   private drillInto(id: TaskId, label: string) {
+    this.closeEdit()
     this.drillStack.push({ id, label })
     this.drillId = id
     this.panX = 20; this.panY = 20; this.selectedId = null
-    this.formatBar.selectTask(null)
     this.render(); this.emitBreadcrumb()
   }
 
   drillTo(depth: number) {
+    this.closeEdit()
     this.drillStack = this.drillStack.slice(0, depth + 1)
     this.drillId = this.drillStack[this.drillStack.length - 1].id
     this.panX = 20; this.panY = 20; this.selectedId = null
-    this.formatBar.selectTask(null)
     this.render(); this.emitBreadcrumb()
   }
 
@@ -546,8 +602,17 @@ export class GanttView {
       ? this.project.tasks.get(anchor)?.raw.panel ?? null
       : (parentId === null ? this.project.panels[0]?.id ?? null : null)
     const siblings = this.siblingsOf(anchor)
-    const today = new Date().toISOString().split('T')[0]
     const id = newTaskId()
+
+    // Anchor the new task to the timeline it's being inserted into — NOT "today",
+    // which would jump it far from an example that lives in the past/future. The
+    // scheduler floors start at max(anchor, prereqEnd), so any date <= context works.
+    const anchorRt = anchor ? this.project.tasks.get(anchor) : null
+    const contextStart =
+      anchorRt?.computed?.start ??
+      siblings.map(s => s.computed?.start).filter(Boolean).sort((a, b) => a!.getTime() - b!.getTime())[0] ??
+      new Date()
+    const startAnchor = contextStart.toISOString().split('T')[0]
 
     let order: string
     let prerequisites: NodeId[] = []
@@ -575,7 +640,7 @@ export class GanttView {
     const base = {
       id, name: data.name, parent: parentId, panel: parentId === null ? panelId : null,
       order, prerequisites, tags: [] as string[],
-      timeMode: 'duration' as const, duration: data.duration, start: today,
+      timeMode: 'duration' as const, duration: data.duration, start: startAnchor,
       style: data.type === 'container'
         ? { background: '#334155', text: '#f8fafc' }
         : { background: '#1e3a5f', text: '#dbeafe' },
@@ -593,7 +658,7 @@ export class GanttView {
 
     this.project.dirty = true
     schedule(this.project)
-    this.pendingEditId = id
+    this.newlyCreatedId = id
     this.render()
   }
 

@@ -6,9 +6,9 @@ import type {
 // ─── Constants (fixed element sizes — never scale with time zoom) ──────────────
 
 export const TASK_HEIGHT   = 34
-export const LABEL_BELOW_H = 16   // room for the task name rendered under the bar
-export const ROW_GAP       = 16
-export const ROW_STRIDE    = TASK_HEIGHT + LABEL_BELOW_H + ROW_GAP
+export const LABEL_ABOVE_H = 17   // room for the task name rendered above the bar
+export const ROW_GAP       = 14
+export const ROW_STRIDE    = LABEL_ABOVE_H + TASK_HEIGHT + ROW_GAP
 export const PX_PER_DAY    = 10
 export const MIN_TASK_W    = 44
 export const POSTREQ_GAP   = 18   // enforced horizontal gap between a task and its successors
@@ -30,11 +30,10 @@ function claim(occ: Map<number, Interval[]>, row: number, s: number, e: number):
   if (!occ.has(row)) occ.set(row, [])
   occ.get(row)!.push([s, e])
 }
-function pickRow(occ: Map<number, Interval[]>, preferred: number, s: number, e: number): number {
-  for (let d = 0; d <= 400; d++) {
-    for (const r of (d === 0 ? [preferred] : [preferred + d, preferred - d])) {
-      if (r >= 0 && isFree(occ, r, s, e)) return r
-    }
+// Nearest free row at or BELOW `preferred` (staircase grows downward).
+function pickRowDown(occ: Map<number, Interval[]>, preferred: number, s: number, e: number): number {
+  for (let r = Math.max(0, preferred); r <= preferred + 400; r++) {
+    if (isFree(occ, r, s, e)) return r
   }
   return preferred
 }
@@ -121,7 +120,9 @@ function layoutGroup(input: GroupInput): GroupOutput {
     xRight.set(id, x + w)
   }
 
-  // Row assignment (time-aware, fan-in midpoint) — milestones don't occupy rows
+  // Staircase row assignment: a task sits one row BELOW its lowest (non-milestone)
+  // prerequisite, so prereq chains step down-and-right and every bar has empty space
+  // above it for its name. Milestones don't occupy rows.
   const occ = new Map<number, Interval[]>()
   const rowOf = new Map<NodeId, number>()
   for (const id of order) {
@@ -129,9 +130,9 @@ function layoutGroup(input: GroupInput): GroupOutput {
     const pres = prereqsOf(id).filter(p => kindOf(p) !== 'milestone')
     const preferred = pres.length === 0
       ? 0
-      : Math.round(pres.reduce((s, p) => s + (rowOf.get(p) ?? 0), 0) / pres.length)
+      : Math.max(...pres.map(p => rowOf.get(p) ?? 0)) + 1
     const s = xLeft.get(id)!, e = xRight.get(id)!
-    const row = pickRow(occ, preferred, s, e)
+    const row = pickRowDown(occ, preferred, s, e)
     claim(occ, row, s, e)
     rowOf.set(id, row)
   }
@@ -206,22 +207,12 @@ function buildTopLevel(project: Project, pxPerDay: number): LayoutResult {
     const ms = [...project.milestones.values()].filter(m => m.raw.parent === null && m.raw.panel === panel.id)
 
     const g = layoutGroup({
-      tasks, milestones: ms, sectionStart, pxPerDay, panelId: panel.id, yBase: PANEL_V_PAD,
+      tasks, milestones: ms, sectionStart, pxPerDay, panelId: panel.id, yBase: PANEL_V_PAD + LABEL_ABOVE_H,
     })
-    const height = g.rowCount * ROW_STRIDE + PANEL_V_PAD * 2
+    const height = g.rowCount * ROW_STRIDE + PANEL_V_PAD * 2 + LABEL_ABOVE_H
 
-    // Each container gets a completion-milestone line at its right edge, so its
-    // boundary is visible even before you drill in (#1).
-    for (const t of tasks) {
-      if (t.raw.type !== 'container') continue
-      const node = g.nodes.find(n => n.id === t.raw.id)
-      if (!node) continue
-      g.nodes.push({
-        id: `__end_${t.raw.id}`, kind: 'milestone',
-        x: node.x + node.width, y: PANEL_V_PAD, width: MILESTONE_W,
-        height: g.rowCount * ROW_STRIDE, row: 0, panelId: panel.id,
-      })
-    }
+    // Note: a container's completion milestone is intentionally NOT drawn at its own
+    // level — it only appears as the terminal boundary when you drill into it.
 
     panels.push({
       panelId: panel.id, name: panel.name, color: panel.color,
@@ -265,9 +256,9 @@ function buildDrilled(project: Project, drillId: TaskId, pxPerDay: number): Layo
   const g = layoutGroup({
     tasks: children,
     milestones: [...boundary, ...childMilestones],
-    sectionStart: start, pxPerDay, panelId, yBase: PANEL_V_PAD,
+    sectionStart: start, pxPerDay, panelId, yBase: PANEL_V_PAD + LABEL_ABOVE_H,
   })
-  const height = g.rowCount * ROW_STRIDE + PANEL_V_PAD * 2
+  const height = g.rowCount * ROW_STRIDE + PANEL_V_PAD * 2 + LABEL_ABOVE_H
 
   const panel = project.panels.find(p => p.id === panelId)
   return {
