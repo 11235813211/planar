@@ -38,6 +38,7 @@ export class EditPopup {
 
   get openFor(): string | null { return this.rt?.raw.id ?? null }
   get isOpen(): boolean { return this.rt !== null }
+  contains(n: Node | null): boolean { return !!n && this.el.contains(n) }
 
   close() {
     this.rt = null; this.cb = null
@@ -52,13 +53,22 @@ export class EditPopup {
     this.reposition(anchor)
   }
 
-  /** Reposition below the anchor (called after re-renders move the task). */
+  /** Reposition below the anchor (or above if it wouldn't fit), clamped to the host. */
   reposition(anchor: { x: number; y: number; bottom: number }) {
     const hostRect = this.host.getBoundingClientRect()
     const pw = this.el.offsetWidth || 280
+    const ph = this.el.offsetHeight || 320
+    const hostH = this.host.clientHeight
+
     let left = anchor.x - hostRect.left
     left = Math.max(8, Math.min(left, this.host.clientWidth - pw - 8))
-    const top = anchor.bottom - hostRect.top + 8
+
+    const below = anchor.bottom - hostRect.top + 8
+    const above = anchor.y - hostRect.top - ph - 8
+    // Prefer below; flip above if it overflows and there's room; else clamp + scroll.
+    let top = below
+    if (below + ph > hostH - 8) top = above >= 8 ? above : Math.max(8, hostH - ph - 8)
+
     this.el.style.left = `${left}px`
     this.el.style.top = `${top}px`
   }
@@ -66,8 +76,13 @@ export class EditPopup {
   private render(project: Project) {
     const rt = this.rt!; const raw = rt.raw
     const isTicket = raw.type === 'ticket'
+    const isDateMode = raw.timeMode === 'date'
     const tags = [...project.tags.values()]
     const dur = raw.duration ?? 7
+    const cs = rt.computed?.start
+    const ce = rt.computed?.end
+    const startVal = raw.start ?? (cs ? cs.toISOString().slice(0, 10) : '')
+    const endVal = raw.end ?? (ce ? ce.toISOString().slice(0, 10) : '')
 
     this.el.innerHTML = `
       <div class="ep-head">
@@ -75,20 +90,24 @@ export class EditPopup {
           <button class="seg-btn ${isTicket ? 'active' : ''}" data-type="ticket">Ticket</button>
           <button class="seg-btn ${!isTicket ? 'active' : ''}" data-type="container">Milestone</button>
         </div>
-        <button class="ep-close" title="Close">✕</button>
       </div>
       <label class="ep-l">Name</label>
       <input class="ep-in" id="ep-name" value="${esc(raw.name)}" />
-      <div class="ep-row">
-        <div style="flex:1">
-          <label class="ep-l">Duration (days)</label>
-          <input class="ep-in" id="ep-dur" type="number" min="1" value="${dur}" ${isTicket ? '' : 'disabled title="Milestone tasks size to their children"'} />
-        </div>
-        ${isTicket ? `<div style="flex:1">
-          <label class="ep-l">Ticket</label>
-          <input class="ep-in" id="ep-ticket" value="${esc((raw as TicketTask).ticket ?? '')}" placeholder="ENG-123" />
-        </div>` : ''}
+      ${isTicket ? `<label class="ep-l">Ticket</label>
+        <input class="ep-in" id="ep-ticket" value="${esc((raw as TicketTask).ticket ?? '')}" placeholder="ENG-123" />` : ''}
+      <label class="ep-l">Scheduling</label>
+      <div class="seg ep-mode">
+        <button class="seg-btn ${!isDateMode ? 'active' : ''}" data-mode="duration">Duration</button>
+        <button class="seg-btn ${isDateMode ? 'active' : ''}" data-mode="date">Date-fixed</button>
       </div>
+      ${isDateMode ? `
+        <div class="ep-row">
+          <div style="flex:1"><label class="ep-l">Start</label><input class="ep-in" id="ep-start" type="date" value="${startVal}" /></div>
+          <div style="flex:1"><label class="ep-l">End</label><input class="ep-in" id="ep-end" type="date" value="${endVal}" /></div>
+        </div>`
+      : `
+        <label class="ep-l">Duration (days)</label>
+        <input class="ep-in" id="ep-dur" type="number" min="1" value="${dur}" ${isTicket ? '' : 'disabled title="Milestone tasks size to their children"'} />`}
       <label class="ep-l">Colour</label>
       <div class="ep-swatches" id="ep-colors"></div>
       <label class="ep-l">Tags</label>
@@ -107,7 +126,20 @@ export class EditPopup {
         if (to !== raw.type) this.cb!.onConvert(to)
       })
     })
-    this.el.querySelector('.ep-close')!.addEventListener('click', () => this.cb!.onClose())
+
+    // schedule mode toggle
+    this.el.querySelectorAll<HTMLButtonElement>('.ep-mode .seg-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const mode = btn.dataset.mode as 'duration' | 'date'
+        if (mode === raw.timeMode) return
+        raw.timeMode = mode
+        if (mode === 'date') {
+          raw.start = startVal || new Date().toISOString().slice(0, 10)
+          raw.end = endVal || raw.start
+        }
+        this.cb!.onChange(); this.render(project)
+      })
+    })
 
     const nameIn = this.el.querySelector<HTMLInputElement>('#ep-name')!
     nameIn.addEventListener('input', () => { raw.name = nameIn.value; this.cb!.onChange() })
@@ -115,8 +147,12 @@ export class EditPopup {
     const durIn = this.el.querySelector<HTMLInputElement>('#ep-dur')
     durIn?.addEventListener('input', () => {
       const v = parseInt(durIn.value)
-      if (!isNaN(v) && v > 0) { (raw as TicketTask | ContainerTask).duration = v; (raw as any).timeMode = 'duration'; this.cb!.onChange() }
+      if (!isNaN(v) && v > 0) { (raw as TicketTask | ContainerTask).duration = v; raw.timeMode = 'duration'; this.cb!.onChange() }
     })
+    const startIn = this.el.querySelector<HTMLInputElement>('#ep-start')
+    startIn?.addEventListener('change', () => { if (startIn.value) { raw.start = startIn.value; this.cb!.onChange() } })
+    const endIn = this.el.querySelector<HTMLInputElement>('#ep-end')
+    endIn?.addEventListener('change', () => { if (endIn.value) { raw.end = endIn.value; this.cb!.onChange() } })
 
     const tkIn = this.el.querySelector<HTMLInputElement>('#ep-ticket')
     tkIn?.addEventListener('input', () => { (raw as TicketTask).ticket = tkIn.value.trim() || null; this.cb!.onChange() })

@@ -1,5 +1,6 @@
 import type { Project, Tag } from '../types'
 import { newTagId } from '../data/ids'
+import { bindModalEnter } from './modalKit'
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')
 const PRESET = ['#2563eb', '#16a34a', '#d97706', '#dc2626', '#7c3aed', '#0891b2', '#be185d', '#65a30d']
@@ -11,6 +12,7 @@ export function openTagManager(project: Project, onChange: () => void) {
   modal.className = 'modal'
   overlay.appendChild(modal)
   document.body.appendChild(overlay)
+  bindModalEnter(overlay)
 
   const close = () => document.body.removeChild(overlay)
   overlay.addEventListener('click', (e) => { if (e.target === overlay) close() })

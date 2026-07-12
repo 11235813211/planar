@@ -125,6 +125,7 @@ export class GanttView {
     c.removeEventListener('pointerup', this.onPointerUp)
     c.removeEventListener('pointercancel', this.onPointerUp)
     c.removeEventListener('wheel', this.onWheel)
+    document.removeEventListener('pointerdown', this.onOutsidePointer)
     c.classList.remove('gantt-root', 'panning')
   }
 
@@ -197,6 +198,15 @@ export class GanttView {
     band.setAttribute('width', String(panel.width + 4000)); band.setAttribute('height', String(panel.height))
     band.setAttribute('fill', panel.color); band.setAttribute('opacity', '0.04')
     g.appendChild(band)
+
+    // Dimmed-context divider (drilled view)
+    if (panel.contextDividerY != null) {
+      const div = el('line')
+      div.setAttribute('x1', '-2000'); div.setAttribute('y1', String(panel.contextDividerY))
+      div.setAttribute('x2', String(panel.width + 2000)); div.setAttribute('y2', String(panel.contextDividerY))
+      div.setAttribute('stroke', '#cbd5e1'); div.setAttribute('stroke-dasharray', '2 5'); div.setAttribute('stroke-width', '1')
+      g.appendChild(div)
+    }
 
     const nodeMap = new Map<string, LayoutNode>(panel.nodes.map(n => [n.id, n]))
     for (const p of renderConnectors(panel.connectors, nodeMap)) g.appendChild(p)
@@ -381,7 +391,9 @@ export class GanttView {
   // (#canvas-wrap) is shared/reused across views, so leaked listeners (esp. the
   // pointer-capture on pointerdown) would otherwise swallow clicks in other views.
   private onPointerDown = (e: PointerEvent) => {
-    if ((e.target as Element).closest('.task-block, .milestone-flag, .add-btn')) return
+    // Don't start a pan (which captures the pointer) when the press is on an
+    // interactive overlay — doing so would steal the click from it.
+    if ((e.target as Element).closest('.task-block, .milestone-flag, .add-btn, .panel-bars, .edit-popup')) return
     if (this.pickPrereqFor) return
     this.isPanning = true; this.last = { x: e.clientX, y: e.clientY }
     this.container.classList.add('panning'); this.container.setPointerCapture(e.pointerId)
@@ -487,9 +499,19 @@ export class GanttView {
       onDelete: () => this.deleteTask(id),
       onClose: () => this.closeEdit(),
     })
+    // Close when the user interacts anywhere outside the popup (next tick so this
+    // opening click doesn't immediately dismiss it).
+    setTimeout(() => document.addEventListener('pointerdown', this.onOutsidePointer), 0)
+  }
+
+  private onOutsidePointer = (e: PointerEvent) => {
+    if (this.popup.contains(e.target as Node)) return
+    // A click on another task will re-open for that task via its own handler.
+    this.closeEdit()
   }
 
   private closeEdit() {
+    document.removeEventListener('pointerdown', this.onOutsidePointer)
     this.popup.close()
     this.select(null)
   }

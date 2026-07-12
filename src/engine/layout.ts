@@ -10,8 +10,7 @@ export const LABEL_ABOVE_H = 17   // room for the task name rendered above the b
 export const ROW_GAP       = 14
 export const ROW_STRIDE    = LABEL_ABOVE_H + TASK_HEIGHT + ROW_GAP
 export const PX_PER_DAY    = 10
-export const MIN_TASK_W    = 44
-export const POSTREQ_GAP   = 18   // enforced horizontal gap between a task and its successors
+export const MIN_TASK_W    = 16   // tiny leaf tickets stay clickable (kept small to avoid overrun)
 export const SECTION_PAD   = 40   // left padding inside a panel
 export const PANEL_V_PAD   = 20   // vertical padding inside a panel
 export const PANEL_GAP     = 14   // gap between stacked panels
@@ -40,10 +39,8 @@ function pickRowDown(occ: Map<number, Interval[]>, preferred: number, s: number,
 
 // ─── Group layout ──────────────────────────────────────────────────────────────
 //
-// Lays out a set of sibling tasks + milestones sharing one timeline.
-// x is derived from time BUT enforced to leave POSTREQ_GAP after any
-// prerequisite — this both spaces out chained tasks and guarantees a task
-// never overlaps the milestone line that precedes it.
+// Lays out a set of sibling tasks + milestones sharing one timeline. x is pure
+// time; prereq successors staircase down a row so chains read as a diagonal.
 
 interface GroupInput {
   tasks: RuntimeTask[]
@@ -68,13 +65,18 @@ function layoutGroup(input: GroupInput): GroupOutput {
   const groupIds = new Set<NodeId>([...tasks.map(t => t.raw.id), ...milestones.map(m => m.raw.id)])
   const startMs = sectionStart.getTime()
 
+  // No clamp: dimmed context tasks before the section start get a negative offset
+  // (visible by scrolling left).
   const timeX = (d: Date | undefined): number =>
-    d ? SECTION_PAD + Math.max(0, (d.getTime() - startMs) / MS) * pxPerDay : SECTION_PAD
+    d ? SECTION_PAD + ((d.getTime() - startMs) / MS) * pxPerDay : SECTION_PAD
 
   const widthOf = (id: NodeId, kind: LayoutKind): number => {
     if (kind === 'milestone') return MILESTONE_W
     const rt = tasks.find(t => t.raw.id === id)!
-    return Math.max((rt.computed?.durationDays ?? 1) * pxPerDay, MIN_TASK_W)
+    // Milestone-tasks (containers) size to their real span; only tiny leaf tickets
+    // get a minimum width so they stay clickable.
+    const px = (rt.computed?.durationDays ?? 1) * pxPerDay
+    return rt.raw.type === 'container' ? Math.max(px, 8) : Math.max(px, MIN_TASK_W)
   }
 
   const kindOf = (id: NodeId): LayoutKind => {
@@ -105,19 +107,16 @@ function layoutGroup(input: GroupInput): GroupOutput {
   }
   for (const id of groupIds) if (!order.includes(id)) order.push(id)
 
-  // x with gap enforcement
+  // Pure time-based x: bars align exactly with the date axis, and milestones sit on
+  // day boundaries. Visual separation of chained tasks comes from the staircase rows
+  // (below), not from horizontal gaps — so nothing runs over a milestone line.
   const xLeft = new Map<NodeId, number>()
   const xRight = new Map<NodeId, number>()
   for (const id of order) {
     const kind = kindOf(id)
-    const w = widthOf(id, kind)
-    let x = timeX(computedOf(id)?.start)
-    for (const p of prereqsOf(id)) {
-      const px = (xRight.get(p) ?? 0) + POSTREQ_GAP
-      if (px > x) x = px
-    }
+    const x = timeX(computedOf(id)?.start)
     xLeft.set(id, x)
-    xRight.set(id, x + w)
+    xRight.set(id, x + widthOf(id, kind))
   }
 
   // Staircase row assignment: a task sits one row BELOW its lowest (non-milestone)
@@ -253,20 +252,45 @@ function buildDrilled(project: Project, drillId: TaskId, pxPerDay: number): Layo
     })
   }
 
+  const childBase = PANEL_V_PAD + LABEL_ABOVE_H
   const g = layoutGroup({
     tasks: children,
     milestones: [...boundary, ...childMilestones],
-    sectionStart: start, pxPerDay, panelId, yBase: PANEL_V_PAD + LABEL_ABOVE_H,
+    sectionStart: start, pxPerDay, panelId, yBase: childBase,
   })
-  const height = g.rowCount * ROW_STRIDE + PANEL_V_PAD * 2 + LABEL_ABOVE_H
 
+  let nodes = g.nodes
+  let connectors = g.connectors
+  let bottomRows = g.rowCount
+
+  // Dimmed context: the container's own siblings, shown at their real time positions
+  // (scroll before/after the section to see them) below a divider lane.
+  const siblingScope = container.raw.parent === null
+    ? project.roots.filter(r => r.raw.panel === panelId)
+    : (project.tasks.get(container.raw.parent)?.children ?? [])
+  const siblings = siblingScope.filter(t => t.raw.id !== drillId)
+  let contextTop = 0
+  if (siblings.length > 0) {
+    const ctxBase = childBase + g.rowCount * ROW_STRIDE + ROW_STRIDE   // one blank lane as a divider
+    contextTop = ctxBase - ROW_STRIDE / 2
+    const sg = layoutGroup({
+      tasks: siblings, milestones: [], sectionStart: start, pxPerDay, panelId,
+      yBase: ctxBase, dimmedIds: new Set(siblings.map(s => s.raw.id)),
+    })
+    nodes = [...nodes, ...sg.nodes]
+    connectors = [...connectors, ...sg.connectors]
+    bottomRows = g.rowCount + 1 + sg.rowCount
+  }
+
+  const height = bottomRows * ROW_STRIDE + PANEL_V_PAD * 2 + LABEL_ABOVE_H
   const panel = project.panels.find(p => p.id === panelId)
   return {
     panels: [{
       panelId, name: container.raw.name, color: panel?.color ?? '#2563eb',
-      nodes: g.nodes, connectors: g.connectors, yOffset: 0, height, width: g.width,
+      nodes, connectors, yOffset: 0, height, width: Math.max(g.width, 400),
+      contextDividerY: siblings.length > 0 ? contextTop : undefined,
     }],
-    width: g.width,
+    width: Math.max(g.width, 400),
     height,
     sectionStart: start,
   }

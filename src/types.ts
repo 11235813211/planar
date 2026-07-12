@@ -187,14 +187,18 @@ export interface PanelLayout {
   yOffset: number   // px from canvas top
   height: number
   width: number
+  contextDividerY?: number  // y of the dimmed-context divider (drilled view only)
 }
 
 // ─── Conflict detection ───────────────────────────────────────────────────────
 
 export type ConflictChoice = 'compress' | 'push' | 'cancel'
 
+/** A date-fixed task/milestone whose prerequisites can't finish in time. */
 export interface ScheduleConflict {
-  milestoneId: MilestoneId
-  milestoneName: string
+  nodeId: NodeId
+  nodeName: string
+  fixedDate: string     // ISO — the fixed start/end that was overrun
+  requiredDate: string  // ISO — when prerequisites actually allow it
   overflowDays: number
 }

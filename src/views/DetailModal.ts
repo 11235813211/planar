@@ -1,4 +1,5 @@
 import type { RuntimeTask, Project, TicketTask } from '../types'
+import { bindModalEnter } from './modalKit'
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')
 
@@ -62,6 +63,7 @@ export function openDetailModal(rt: RuntimeTask, project: Project, onSave: () =>
 
   overlay.appendChild(modal)
   document.body.appendChild(overlay)
+  bindModalEnter(overlay)
 
   const selectedAssignees = new Set(raw.assignees)
   const selectedTags = new Set(raw.tags)

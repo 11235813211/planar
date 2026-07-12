@@ -4,10 +4,13 @@ Reusable browser-driven checks for Planar. The dev server must be running.
 
 ```bash
 npm run dev            # in one terminal (serves http://localhost:5173/planar/)
-npm run e2e:verify     # full interaction verification (+ screenshots in e2e/shots)
+npm run e2e:features   # broad suite — 28 checks across scheduling, popup, panels, kanban, gestures
+npm run e2e:verify     # interaction verification (+ screenshots in e2e/shots)
 npm run e2e:diagnose   # quick health check of the common problem areas
-HEADED=1 node e2e/verify.mjs   # watch it run in a real window
+HEADED=1 node e2e/features.mjs # watch it run in a real window
 ```
+
+`e2e/features.mjs` exits non-zero on any failure, so it's ready to drop into CI later.
 
 ## Writing a check
 

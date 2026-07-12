@@ -53,9 +53,9 @@ export function renderTaskBlock(
   // Container "stacked" shadow (signals it drills in) — drawn behind the bar
   if (isContainer) {
     const shadow = el('rect')
-    shadow.setAttribute('x', String(x + 3)); shadow.setAttribute('y', String(y + 3))
+    shadow.setAttribute('x', String(x + 5)); shadow.setAttribute('y', String(y + 5))
     shadow.setAttribute('width', String(w)); shadow.setAttribute('height', String(TASK_HEIGHT))
-    shadow.setAttribute('rx', '6'); shadow.setAttribute('fill', raw.style.background); shadow.setAttribute('opacity', '0.35')
+    shadow.setAttribute('rx', '6'); shadow.setAttribute('fill', raw.style.background); shadow.setAttribute('opacity', '0.4')
     g.appendChild(shadow)
   }
 

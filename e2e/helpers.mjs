@@ -75,8 +75,15 @@ function makeApp(page, errors) {
     centerOf, rectOf,
 
     // --- app lifecycle ---
-    async loadExample() { await page.click('#su-example'); await wait(350) },
-    async newProject() { await page.click('#su-new'); await wait(350) },
+    // Always start from a fresh page so it works even after a project is loaded.
+    async loadExample() {
+      if (!(await page.isVisible('#su-example'))) { await page.goto(URL, { waitUntil: 'networkidle' }) }
+      await page.click('#su-example'); await wait(350)
+    },
+    async newProject() {
+      if (!(await page.isVisible('#su-new'))) { await page.goto(URL, { waitUntil: 'networkidle' }) }
+      await page.click('#su-new'); await wait(350)
+    },
     async gotoKanban() { await page.click('#btn-kanban'); await wait(250) },
     async gotoGantt() { await page.click('#btn-gantt'); await wait(250) },
     async openTags() { await page.click('#btn-tags'); await wait(200) },
@@ -128,6 +135,15 @@ function makeApp(page, errors) {
     // --- modal helpers ---
     modalOpen: () => page.$eval('body', () => !!document.querySelector('.modal-overlay')).catch(() => false),
     async fill(sel, val) { await page.fill(sel, String(val)); await wait(60) },
+
+    // Re-run the scheduler on the live project; returns ScheduleConflict[].
+    reschedule: () => page.evaluate(() => window.__reschedule()),
+    // Mutate a task's raw fields directly, then reschedule (for scheduling tests).
+    setRaw: (id, patch) => page.evaluate(({ id, patch }) => {
+      const rt = window.__planar.tasks.get(id)
+      Object.assign(rt.raw, patch)
+      return window.__reschedule()
+    }, { id, patch }),
 
     // --- misc ---
     eval: (fn, ...args) => page.evaluate(fn, ...args),

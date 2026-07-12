@@ -2,6 +2,7 @@ import type { Project, RuntimeTask, TicketTask, KanbanColumn } from '../types'
 import { openDetailModal } from './DetailModal'
 import { colorForId, initials } from '../render/Avatar'
 import { newColumnId } from '../data/ids'
+import { bindModalEnter } from './modalKit'
 
 type TicketRuntimeTask = RuntimeTask & { raw: TicketTask }
 const isTicketRT = (rt: RuntimeTask): rt is TicketRuntimeTask => rt.raw.type === 'ticket'
@@ -128,6 +129,7 @@ export class KanbanView {
         </div>
       </div>`
     document.body.appendChild(overlay)
+    bindModalEnter(overlay)
     const close = () => document.body.removeChild(overlay)
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close() })
     overlay.querySelector('#cc-cancel')!.addEventListener('click', close)

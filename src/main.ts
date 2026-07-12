@@ -53,7 +53,10 @@ function loadProject(p: Project) {
   project = p
   const conflicts = schedule(project)
   if (conflicts.length) console.warn('Schedule conflicts:', conflicts)
-  ;(window as unknown as { __planar: Project }).__planar = project  // for e2e inspection
+  // e2e inspection hooks
+  const w = window as unknown as { __planar: Project; __reschedule: () => unknown }
+  w.__planar = project
+  w.__reschedule = () => schedule(project!)
 
   document.getElementById('startup')!.style.display = 'none'
   const canvasWrap = document.getElementById('canvas-wrap')!

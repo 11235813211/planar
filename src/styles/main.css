@@ -47,6 +47,7 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 /* ─── Edit popup (floats below the clicked task) ──────────────────── */
 .edit-popup {
   position: absolute; z-index: 55; width: 280px;
+  max-height: calc(100% - 16px); overflow-y: auto;
   background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
   box-shadow: 0 10px 34px rgba(0,0,0,.22); padding: 12px; user-select: none;
 }
