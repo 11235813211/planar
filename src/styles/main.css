@@ -44,12 +44,17 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .gantt-root { user-select: none; -webkit-user-select: none; }
 #canvas-wrap.panning { cursor: grabbing; }
 
-/* ─── Format bar ──────────────────────────────────────────────── */
+/* ─── Format bar (floating — must not reflow the canvas) ──────────── */
+#format-bar-wrap {
+  position: fixed; left: 0; right: 0; bottom: 16px; z-index: 50;
+  display: flex; justify-content: center; pointer-events: none;
+}
 #format-bar {
-  display: flex; align-items: center; gap: 10px; padding: 6px 16px;
-  border-bottom: 1px solid var(--border); background: var(--bg);
-  font-size: 12px; flex-shrink: 0; user-select: none; min-height: 36px;
-  overflow-x: auto;
+  display: flex; align-items: center; gap: 10px; padding: 7px 14px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0,0,0,.18);
+  font-size: 12px; user-select: none; min-height: 36px; max-width: 92vw;
+  overflow-x: auto; pointer-events: auto;
 }
 .fb-label { font-weight: 500; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fb-sep { width: 1px; height: 18px; background: var(--border); flex-shrink: 0; }
@@ -69,11 +74,13 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .chip.on { background: var(--chip); color: #fff; border-color: var(--chip); }
 .muted { color: var(--text-muted); }
 
-/* ─── Placement / pick banner ─────────────────────────────────── */
+/* ─── Placement / pick banner (floating — must not reflow) ─────── */
 #placement-banner {
   display: none; align-items: center; justify-content: center; gap: 8px;
-  padding: 6px 16px; background: #eff6ff; border-bottom: 1px solid #bfdbfe;
-  color: #1d4ed8; font-size: 12px; font-weight: 500; flex-shrink: 0;
+  position: fixed; top: calc(var(--toolbar-h) + 10px); left: 50%; transform: translateX(-50%);
+  z-index: 60; padding: 8px 16px; background: #1d4ed8; border-radius: 999px;
+  color: #fff; font-size: 12px; font-weight: 500;
+  box-shadow: 0 6px 20px rgba(29,78,216,.4);
 }
 #placement-banner::before { content: '⊕'; font-size: 14px; }
 
@@ -88,6 +95,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 
 /* ─── SVG task / milestone ────────────────────────────────────── */
 .task-block { cursor: pointer; }
+.task-block .sel-ring { display: none; }
+.task-block.selected .sel-ring { display: inline; }
 .task-block.dimmed { opacity: 0.32; }
 .task-block.done rect { opacity: 0.4; }
 .task-label { pointer-events: none; }
@@ -121,8 +130,10 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
 .panel-bar {
   position: absolute; right: 0; width: 26px; border-radius: 5px 0 0 5px;
   display: flex; align-items: center; justify-content: center;
-  color: #fff; pointer-events: auto; overflow: visible;
+  color: #fff; pointer-events: auto; overflow: visible; cursor: grab;
 }
+.panel-bar.dragging { opacity: 0.5; }
+.panel-bar.drag-over { box-shadow: 0 -3px 0 0 #111 inset; }
 .panel-bar-name {
   writing-mode: vertical-rl; text-orientation: mixed; transform: rotate(180deg);
   font-size: 11px; font-weight: 600; white-space: nowrap; padding: 6px 0;

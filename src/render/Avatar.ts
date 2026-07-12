@@ -18,7 +18,7 @@ export function initials(name: string): string {
 const AVATAR_R = 9
 const AVATAR_OVERLAP = 13  // center-to-center spacing when multiple avatars
 
-/** Avatars hang off the bottom-right corner of the task rectangle. */
+/** Avatars sit on the right end of the bar, vertically centred. */
 export function renderAvatars(
   people: Person[],
   taskX: number,
@@ -32,7 +32,7 @@ export function renderAvatars(
 
   people.forEach((p, i) => {
     const cx = startX + i * AVATAR_OVERLAP
-    const cy = taskY + taskHeight   // hanging off the bottom edge
+    const cy = taskY + taskHeight / 2   // centred on the bar's right edge
 
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g')
     g.classList.add('avatar-circle')

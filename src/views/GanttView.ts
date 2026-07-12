@@ -72,12 +72,21 @@ function startInlineEdit(labelEl: SVGTextElement, rt: RuntimeTask, project: Proj
     'padding:0 4px', 'outline:none', 'z-index:300', 'background:#fff', 'color:#111',
   ].join(';')
   labelEl.style.display = 'none'
+  let done = false
+  const teardown = () => {
+    if (done) return
+    done = true
+    input.removeEventListener('blur', commit)   // detach first to avoid re-entrancy on remove
+    if (input.isConnected) input.remove()
+    labelEl.style.display = ''
+  }
   const commit = () => {
+    if (done) return
     const v = input.value.trim()
     if (v) { rt.raw.name = v; project.dirty = true }
-    input.remove(); labelEl.style.display = ''; onCommit()
+    teardown(); onCommit()
   }
-  const cancel = () => { input.remove(); labelEl.style.display = '' }
+  const cancel = () => teardown()
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') commit()
     if (e.key === 'Escape') cancel()
@@ -97,7 +106,6 @@ export class GanttView {
   private svg: SVGSVGElement
   private axisG: SVGGElement
   private contentG: SVGGElement
-  private clipRect: SVGRectElement
   private panelBars: HTMLElement
 
   private project: Project
@@ -114,6 +122,7 @@ export class GanttView {
   private pendingEditId: TaskId | null = null
   private pickPrereqFor: NodeId | null = null
   private currentSectionStart: Date | null = null
+  private dragPanelId: string | null = null
   private ro: ResizeObserver
 
   constructor(container: HTMLElement, project: Project, formatBar: FormatBar) {
@@ -129,13 +138,11 @@ export class GanttView {
     this.svg.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;user-select:none;'
     container.appendChild(this.svg)
 
-    const defs = el('defs')
-    const clip = el('clipPath'); clip.setAttribute('id', 'content-clip')
-    this.clipRect = el('rect')
-    clip.appendChild(this.clipRect); defs.appendChild(clip)
-    this.svg.appendChild(defs)
-
-    this.contentG = el('g'); this.contentG.setAttribute('clip-path', 'url(#content-clip)')
+    // NOTE: no clip-path on contentG. A clip-path on a transformed <g> silently
+    // disables pointer events for all its children in Chromium. The opaque date-bar
+    // background masks content that scrolls under it, and the <svg> viewport clips
+    // the rest — so an explicit clip is unnecessary.
+    this.contentG = el('g')
     this.axisG = el('g')
     this.svg.appendChild(this.contentG)
     this.svg.appendChild(this.axisG)
@@ -163,8 +170,6 @@ export class GanttView {
     const W = this.W, H = this.H
     this.svg.setAttribute('width', String(W))
     this.svg.setAttribute('height', String(H))
-    this.clipRect.setAttribute('x', '0'); this.clipRect.setAttribute('y', String(this.dateBarH))
-    this.clipRect.setAttribute('width', String(W)); this.clipRect.setAttribute('height', String(Math.max(0, H - this.dateBarH)))
 
     this.contentG.innerHTML = ''
     this.axisG.innerHTML = ''
@@ -231,7 +236,15 @@ export class GanttView {
             if (rt.raw.type === 'container') this.drillInto(node.id, rt.raw.name)
             else openDetailModal(rt, this.project, () => { schedule(this.project); this.render() })
           },
-          onLabelClick: (lbl) => startInlineEdit(lbl, this.project.tasks.get(node.id)!, this.project, () => { schedule(this.project); this.render() }),
+          onLabelClick: (lbl) => {
+            if (this.pickPrereqFor) { this.completePickPrereq(node.id); return }
+            // First click selects; clicking the label of an already-selected task renames it.
+            if (this.selectedId === node.id) {
+              startInlineEdit(lbl, this.project.tasks.get(node.id)!, this.project, () => { schedule(this.project); this.render() })
+            } else {
+              this.select(node.id)
+            }
+          },
           onAddRight: () => this.promptAddTask(node.id, 'after'),
           onAddLeft: () => this.promptAddTask(node.id, 'before'),
         })
@@ -329,17 +342,26 @@ export class GanttView {
       bar.style.top = `${panel.yOffset}px`
       bar.style.height = `${panel.height}px`
       bar.style.background = panel.color
+      bar.dataset.panelId = panel.panelId
       bar.innerHTML = `<span class="panel-bar-name">${panel.name}</span>`
 
+      // Double-click the bar to rename the panel.
+      bar.addEventListener('dblclick', () => this.renamePanel(panel.panelId))
+
       if (reorderable) {
+        bar.draggable = true
+        bar.addEventListener('dragstart', (e) => { this.dragPanelId = panel.panelId; e.dataTransfer!.effectAllowed = 'move'; bar.classList.add('dragging') })
+        bar.addEventListener('dragend', () => { this.dragPanelId = null; bar.classList.remove('dragging') })
+        bar.addEventListener('dragover', (e) => { e.preventDefault(); bar.classList.add('drag-over') })
+        bar.addEventListener('dragleave', () => bar.classList.remove('drag-over'))
+        bar.addEventListener('drop', (e) => {
+          e.preventDefault(); bar.classList.remove('drag-over')
+          if (this.dragPanelId && this.dragPanelId !== panel.panelId) this.movePanelBefore(this.dragPanelId, panel.panelId)
+        })
+
         const ctrl = document.createElement('div')
         ctrl.className = 'panel-bar-ctrl'
-        ctrl.innerHTML = `
-          <button title="Move up" data-act="up">▲</button>
-          <button title="Colour"  data-act="color"><input type="color" value="${panel.color}" /></button>
-          <button title="Move down" data-act="down">▼</button>`
-        ctrl.querySelector('[data-act="up"]')!.addEventListener('click', (e) => { e.stopPropagation(); this.reorderPanel(panel.panelId, -1) })
-        ctrl.querySelector('[data-act="down"]')!.addEventListener('click', (e) => { e.stopPropagation(); this.reorderPanel(panel.panelId, +1) })
+        ctrl.innerHTML = `<button title="Colour"><input type="color" value="${panel.color}" /></button>`
         const colorInput = ctrl.querySelector<HTMLInputElement>('input[type=color]')!
         colorInput.addEventListener('input', () => this.recolorPanel(panel.panelId, colorInput.value))
         bar.appendChild(ctrl)
@@ -438,10 +460,12 @@ export class GanttView {
   // ─── Selection / drill ────────────────────────────────────────────────────────
 
   private select(id: NodeId | null) {
+    // Incremental — no full re-render (that would break dblclick detection).
     this.selectedId = id
+    this.contentG.querySelectorAll('.task-block.selected').forEach(e => e.classList.remove('selected'))
+    if (id) this.contentG.querySelector(`.task-block[data-id="${id}"]`)?.classList.add('selected')
     const rt = id ? this.project.tasks.get(id) ?? null : null
     this.formatBar.selectTask(rt)
-    this.render()
   }
 
   private drillInto(id: TaskId, label: string) {
@@ -598,16 +622,25 @@ export class GanttView {
     this.render()
   }
 
-  private reorderPanel(panelId: string, dir: -1 | 1) {
+  /** Reorder: drop the dragged panel onto a target. Dragging down drops after; up drops before. */
+  private movePanelBefore(dragId: string, targetId: string) {
     const panels = this.project.panels
-    const i = panels.findIndex(p => p.id === panelId)
-    const j = i + dir
-    if (i < 0 || j < 0 || j >= panels.length) return
-    ;[panels[i], panels[j]] = [panels[j], panels[i]]
-    // Rewrite order keys to reflect the new sequence
-    panels.forEach((p, k) => { p.order = 'a' + String.fromCharCode(97 + k) })
+    const from = panels.findIndex(p => p.id === dragId)
+    const to = panels.findIndex(p => p.id === targetId)
+    if (from < 0 || to < 0 || from === to) return
+    const [moved] = panels.splice(from, 1)
+    const t = panels.findIndex(p => p.id === targetId)
+    panels.splice(from < to ? t + 1 : t, 0, moved)
+    panels.forEach((p, k) => { p.order = 'a' + String(k).padStart(3, '0') })
     this.project.dirty = true
     this.render()
+  }
+
+  private renamePanel(panelId: string) {
+    const p = this.project.panels.find(p => p.id === panelId)
+    if (!p) return
+    const name = prompt('Panel name', p.name)
+    if (name != null && name.trim()) { p.name = name.trim(); this.project.dirty = true; this.render() }
   }
 
   private recolorPanel(panelId: string, color: string) {

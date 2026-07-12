@@ -6,8 +6,9 @@ import type {
 // ─── Constants (fixed element sizes — never scale with time zoom) ──────────────
 
 export const TASK_HEIGHT   = 34
-export const ROW_GAP       = 18
-export const ROW_STRIDE    = TASK_HEIGHT + ROW_GAP
+export const LABEL_BELOW_H = 16   // room for the task name rendered under the bar
+export const ROW_GAP       = 16
+export const ROW_STRIDE    = TASK_HEIGHT + LABEL_BELOW_H + ROW_GAP
 export const PX_PER_DAY    = 10
 export const MIN_TASK_W    = 44
 export const POSTREQ_GAP   = 18   // enforced horizontal gap between a task and its successors
@@ -208,6 +209,19 @@ function buildTopLevel(project: Project, pxPerDay: number): LayoutResult {
       tasks, milestones: ms, sectionStart, pxPerDay, panelId: panel.id, yBase: PANEL_V_PAD,
     })
     const height = g.rowCount * ROW_STRIDE + PANEL_V_PAD * 2
+
+    // Each container gets a completion-milestone line at its right edge, so its
+    // boundary is visible even before you drill in (#1).
+    for (const t of tasks) {
+      if (t.raw.type !== 'container') continue
+      const node = g.nodes.find(n => n.id === t.raw.id)
+      if (!node) continue
+      g.nodes.push({
+        id: `__end_${t.raw.id}`, kind: 'milestone',
+        x: node.x + node.width, y: PANEL_V_PAD, width: MILESTONE_W,
+        height: g.rowCount * ROW_STRIDE, row: 0, panelId: panel.id,
+      })
+    }
 
     panels.push({
       panelId: panel.id, name: panel.name, color: panel.color,
