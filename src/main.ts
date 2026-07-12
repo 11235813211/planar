@@ -38,6 +38,7 @@ function buildShell() {
       </div>
     </div>
     <div id="format-bar-wrap"></div>
+    <div id="placement-banner" style="display:none"></div>
     <div id="breadcrumb" style="display:none"></div>
     <div id="canvas-wrap" style="display:none;flex:1;overflow:hidden;position:relative"></div>
     <div id="startup">
@@ -90,6 +91,13 @@ function showView(view: 'gantt' | 'kanban') {
 }
 
 // ─── Breadcrumb ───────────────────────────────────────────────────────────────
+
+document.addEventListener('planar:placement', (e) => {
+  const { active, hint } = (e as CustomEvent).detail as { active: boolean; hint: string }
+  const banner = document.getElementById('placement-banner')!
+  banner.style.display = active ? 'flex' : 'none'
+  banner.textContent = hint
+})
 
 document.addEventListener('planar:breadcrumb', (e) => {
   const crumbs = (e as CustomEvent).detail as Array<{ label: string; depth: number }>
@@ -177,7 +185,7 @@ async function init() {
   document.getElementById('btn-kanban')!.addEventListener('click', () => showView('kanban'))
 
   document.getElementById('btn-add-task')!.addEventListener('click', () => {
-    ganttView?.addTaskToCurrentSection()
+    ganttView?.openAddTaskModal()
   })
 
   document.getElementById('btn-zoom-in')!.addEventListener('click', ()    => ganttView?.zoomIn())

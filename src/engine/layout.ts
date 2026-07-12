@@ -7,52 +7,53 @@ import type {
 export const TASK_HEIGHT   = 40
 export const TASK_ROW_GAP  = 24
 export const ROW_STRIDE    = TASK_HEIGHT + TASK_ROW_GAP
-export const PX_PER_DAY    = 10          // default px per day (before zoom)
+export const PX_PER_DAY    = 10
 export const MILESTONE_WIDTH = 2
 export const SECTION_H_PAD  = 64
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+const MS = 86_400_000
 
-function rowY(row: number): number {
-  return row * ROW_STRIDE
+// ─── Time-aware row occupancy ────────────────────────────────────────────────
+//
+// A row is "free" at a given time interval [s, e) (day offsets from section
+// start) if no task already assigned to that row overlaps that interval.
+// This lets tasks that don't overlap in time share the same row — the key to
+// avoiding unnecessary crossovers in chains like A→C (C starts where A ends).
+
+type Interval = [number, number]  // [startDay, endDay]
+
+function isFree(occ: Map<number, Interval[]>, row: number, s: number, e: number): boolean {
+  return !(occ.get(row) ?? []).some(([rs, re]) => s < re && e > rs)
 }
 
-function taskWidth(durationDays: number, pxPerDay: number): number {
-  return Math.max(durationDays * pxPerDay, 60)
+function claim(occ: Map<number, Interval[]>, row: number, s: number, e: number): void {
+  if (!occ.has(row)) occ.set(row, [])
+  occ.get(row)!.push([s, e])
 }
 
-function timeToX(date: Date, sectionStart: Date, pxPerDay: number): number {
-  const days = (date.getTime() - sectionStart.getTime()) / 86_400_000
-  return SECTION_H_PAD + Math.max(0, days) * pxPerDay
+// Search outward from `preferred` for the nearest free row at [s, e).
+function pickRow(occ: Map<number, Interval[]>, preferred: number, s: number, e: number): number {
+  for (let d = 0; d <= 200; d++) {
+    const candidates = d === 0 ? [preferred] : [preferred + d, preferred - d]
+    for (const r of candidates) {
+      if (r >= 0 && isFree(occ, r, s, e)) return r
+    }
+  }
+  return preferred  // unreachable in practice
 }
 
-// ─── Section layout ───────────────────────────────────────────────────────────
+// ─── Row assignment (topo sort + fan-in midpoint + time-aware) ───────────────
 
-export function layoutSiblingGroup(
+function assignRows(
   tasks: RuntimeTask[],
   project: Project,
-  parentTaskId: NodeId | null,
-  xOffsetStart: number,
-  pxPerDay: number,
-): SectionLayout[] {
-
-  if (tasks.length === 0) return []
-
-  const milestones = tasks.filter(t => t.raw.type === 'milestone')
-  if (tasks.length === 0) return []
-
-  // Earliest start date = section x-origin
-  let sectionStart: Date | null = null
-  for (const t of tasks) {
-    if (t.computed && (!sectionStart || t.computed.start < sectionStart))
-      sectionStart = t.computed.start
-  }
-  if (!sectionStart) sectionStart = new Date()
-
+  sectionStart: Date,
+): Map<NodeId, number> {
   const siblingIds = new Set(tasks.map(t => t.raw.id))
-
-  // ── Row assignment via topological sort + fan-in midpoint ──────────────────
   const rowOf = new Map<NodeId, number>()
+  const occ   = new Map<number, Interval[]>()
+
+  // Build local adjacency for topological processing
   const inDeg = new Map<NodeId, number>()
   const adj   = new Map<NodeId, NodeId[]>()
   for (const t of tasks) { inDeg.set(t.raw.id, 0); adj.set(t.raw.id, []) }
@@ -65,58 +66,96 @@ export function layoutSiblingGroup(
   }
 
   const queue = [...inDeg.entries()].filter(([, d]) => d === 0).map(([id]) => id)
-  let nextFreeRow = 0
 
   while (queue.length) {
-    const curId = queue.shift()!
-    const siblingPres = project.tasks.get(curId)!.raw.prerequisites.filter(p => siblingIds.has(p))
+    const id = queue.shift()!
+    const t  = project.tasks.get(id)!
+    const c  = t.computed
 
-    if (siblingPres.length === 0) {
-      rowOf.set(curId, nextFreeRow++)
+    // Day-offset interval for this task
+    const s = c ? (c.start.getTime() - sectionStart.getTime()) / MS : 0
+    const e = c ? Math.max(s + 0.01, (c.end.getTime() - sectionStart.getTime()) / MS) : s + 1
+
+    const siblingPres = t.raw.prerequisites.filter(p => siblingIds.has(p))
+    const preferred = siblingPres.length === 0
+      ? 0
+      : Math.round(siblingPres.reduce((sum, p) => sum + (rowOf.get(p) ?? 0), 0) / siblingPres.length)
+
+    let row: number
+    if (t.raw.type === 'milestone') {
+      // Milestones are full-height dividers — don't occupy a row slot
+      row = preferred
     } else {
-      const preRows = siblingPres.map(p => rowOf.get(p) ?? 0)
-      const mid = Math.round(preRows.reduce((a, b) => a + b, 0) / preRows.length)
-      const used = new Set(rowOf.values())
-      let r = mid
-      while (used.has(r)) r++
-      rowOf.set(curId, r)
-      if (r >= nextFreeRow) nextFreeRow = r + 1
+      row = pickRow(occ, preferred, s, e)
+      claim(occ, row, s, e)
     }
 
-    for (const next of adj.get(curId) ?? []) {
+    rowOf.set(id, row)
+
+    for (const next of adj.get(id) ?? []) {
       const d = inDeg.get(next)! - 1
       inDeg.set(next, d)
       if (d === 0) queue.push(next)
     }
   }
 
-  // Milestones span all rows vertically
-  const totalRows = Math.max(nextFreeRow, 1)
+  return rowOf
+}
 
-  // ── Build LayoutNodes ──────────────────────────────────────────────────────
+// ─── Section layout ───────────────────────────────────────────────────────────
+
+export function layoutSiblingGroup(
+  tasks: RuntimeTask[],
+  project: Project,
+  parentTaskId: NodeId | null,
+  xOffsetStart: number,
+  pxPerDay: number,
+): SectionLayout[] {
+  if (tasks.length === 0) return []
+
+  const milestones = tasks.filter(t => t.raw.type === 'milestone')
+
+  // Earliest start across all tasks → section x-origin
+  let sectionStart: Date | null = null
+  for (const t of tasks) {
+    if (t.computed && (!sectionStart || t.computed.start < sectionStart))
+      sectionStart = t.computed.start
+  }
+  if (!sectionStart) sectionStart = new Date()
+
+  const rowOf = assignRows(tasks, project, sectionStart)
+
+  const taskRows = [...rowOf.values()].filter((_, i) => tasks[i]?.raw.type !== 'milestone')
+  const totalRows = taskRows.length === 0 ? 1 : Math.max(...taskRows) + 1
+
+  const siblingIds = new Set(tasks.map(t => t.raw.id))
+  const sectionId  = String(parentTaskId ?? 'root')
+
+  // ── LayoutNodes ────────────────────────────────────────────────────────────
   const nodes: LayoutNode[] = []
-  const sectionId = parentTaskId ?? 'root'
 
   for (const t of tasks) {
-    const c = t.computed
-    if (!c) continue
+    const c   = t.computed
     const id  = t.raw.id
     const row = rowOf.get(id) ?? 0
+    if (!c) continue
+
+    const dayOffset = (c.start.getTime() - sectionStart.getTime()) / MS
+    const x = SECTION_H_PAD + Math.max(0, dayOffset) * pxPerDay
 
     if (t.raw.type === 'milestone') {
       nodes.push({
-        id, x: timeToX(c.start, sectionStart, pxPerDay), y: 0,
-        width: MILESTONE_WIDTH, height: totalRows * ROW_STRIDE,
-        row: 0, sectionId: String(sectionId),
+        id, x, y: 0,
+        width: MILESTONE_WIDTH,
+        height: totalRows * ROW_STRIDE,
+        row: 0, sectionId,
       })
     } else {
+      const w = Math.max(c.durationDays * pxPerDay, 48)
       nodes.push({
-        id,
-        x: timeToX(c.start, sectionStart, pxPerDay),
-        y: rowY(row),
-        width: taskWidth(c.durationDays, pxPerDay),
-        height: TASK_HEIGHT,
-        row, sectionId: String(sectionId),
+        id, x, y: row * ROW_STRIDE,
+        width: w, height: TASK_HEIGHT,
+        row, sectionId,
       })
     }
   }
@@ -124,6 +163,7 @@ export function layoutSiblingGroup(
   // ── Connectors ─────────────────────────────────────────────────────────────
   const connectors: LayoutConnector[] = []
   const nodeMap = new Map(nodes.map(n => [n.id, n]))
+
   for (const t of tasks) {
     for (const preId of t.raw.prerequisites) {
       if (!siblingIds.has(preId)) continue
@@ -132,18 +172,18 @@ export function layoutSiblingGroup(
     }
   }
 
-  const maxX = nodes.reduce((m, n) => Math.max(m, n.x + n.width), 0) + SECTION_H_PAD
+  const maxX   = nodes.reduce((m, n) => Math.max(m, n.x + n.width), 0) + SECTION_H_PAD
+  const height = totalRows * ROW_STRIDE
 
   return [{
-    id: String(sectionId),
+    id: sectionId,
     parentTaskId,
     startMilestoneId: null,
     endMilestoneId: milestones.length > 0 ? milestones[milestones.length - 1].raw.id : null,
-    nodes,
-    connectors,
+    nodes, connectors,
     xOffset: xOffsetStart,
     width: maxX,
-    height: totalRows * ROW_STRIDE,
+    height,
   }]
 }
 

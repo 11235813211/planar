@@ -47,6 +47,8 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
   cursor: grab;
 }
 #canvas-wrap.panning { cursor: grabbing; }
+#canvas-wrap.placing { cursor: crosshair; }
+#canvas-wrap.placing .task-block { cursor: crosshair; }
 
 #gantt-svg {
   width: 100%; height: 100%;
@@ -75,6 +77,16 @@ html, body { height: 100%; background: var(--bg); color: var(--text); font-famil
   transition: transform 0.1s;
 }
 .fb-swatch:hover { transform: scale(1.2); }
+
+/* ─── Placement mode banner ────────────────────────────────────── */
+#placement-banner {
+  display: none; align-items: center; justify-content: center;
+  gap: 8px; padding: 6px 16px;
+  background: #eff6ff; border-bottom: 1px solid #bfdbfe;
+  color: #1d4ed8; font-size: 12px; font-weight: 500;
+  flex-shrink: 0; cursor: default;
+}
+#placement-banner::before { content: '⊕'; font-size: 14px; }
 
 /* ─── Breadcrumb ──────────────────────────────────────────────── */
 #breadcrumb {

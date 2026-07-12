@@ -1,5 +1,5 @@
-import type { Project, NodeId, LayoutNode, RuntimeTask, TicketTask } from '../types'
-import { buildLayout, PX_PER_DAY, SECTION_H_PAD } from '../engine/layout'
+import type { Project, NodeId, LayoutNode, RuntimeTask, TicketTask, SectionLayout } from '../types'
+import { buildLayout, PX_PER_DAY, SECTION_H_PAD, ROW_STRIDE, TASK_HEIGHT } from '../engine/layout'
 import { renderTaskBlock } from '../render/TaskBlock'
 import { renderMilestoneFlag } from '../render/MilestoneFlag'
 import { renderConnectors } from '../render/Connector'
@@ -7,69 +7,176 @@ import { openDetailModal } from './DetailModal'
 import { FormatBar } from './FormatBar'
 import { schedule } from '../engine/scheduler'
 import { newTaskId } from '../data/ids'
+import { openAddTaskModal } from './AddTaskModal'
+import type { NewTaskData } from './AddTaskModal'
 
-const DATE_BAR_H = 40   // height of the date axis strip
-const OUTER_PAD  = 48   // space above tasks (flag lives here)
+// ─── Layout constants ─────────────────────────────────────────────────────────
 
-// ─── Date axis helpers ────────────────────────────────────────────────────────
+const DATE_BAR_H = 56   // total height of the two-row date axis
+const COARSE_H   = 22   // top row height (year / month label)
+const OUTER_PAD  = 44   // space above tasks (flag floats here)
+const MS         = 86_400_000
 
-function formatMonth(d: Date): string {
-  return d.toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' })
+// ─── Adaptive date axis ───────────────────────────────────────────────────────
+
+type Granularity = { coarse: 'year' | 'month', fine: 'quarter' | 'month' | 'week' | 'day' }
+
+function granularity(pxPerDay: number): Granularity {
+  if (pxPerDay >= 20) return { coarse: 'month',  fine: 'day'     }
+  if (pxPerDay >= 5)  return { coarse: 'month',  fine: 'week'    }
+  if (pxPerDay >= 1)  return { coarse: 'year',   fine: 'month'   }
+  return                     { coarse: 'year',   fine: 'quarter' }
+}
+
+function addDays(d: Date, n: number): Date { return new Date(d.getTime() + n * MS) }
+
+function advanceToNext(d: Date, unit: Granularity['fine'] | Granularity['coarse']): Date {
+  const out = new Date(d)
+  switch (unit) {
+    case 'day':     out.setUTCDate(out.getUTCDate() + 1); break
+    case 'week':    out.setUTCDate(out.getUTCDate() + 7); break
+    case 'month':   out.setUTCMonth(out.getUTCMonth() + 1); out.setUTCDate(1); break
+    case 'quarter': out.setUTCMonth(Math.floor(out.getUTCMonth() / 3) * 3 + 3); out.setUTCDate(1); break
+    case 'year':    out.setUTCFullYear(out.getUTCFullYear() + 1); out.setUTCMonth(0); out.setUTCDate(1); break
+  }
+  return out
+}
+
+function snapTo(d: Date, unit: Granularity['fine'] | Granularity['coarse']): Date {
+  const out = new Date(d)
+  switch (unit) {
+    case 'day':     break
+    case 'week':    out.setUTCDate(out.getUTCDate() - out.getUTCDay()); break
+    case 'month':   out.setUTCDate(1); break
+    case 'quarter': out.setUTCMonth(Math.floor(out.getUTCMonth() / 3) * 3); out.setUTCDate(1); break
+    case 'year':    out.setUTCMonth(0); out.setUTCDate(1); break
+  }
+  return out
+}
+
+function fineLabel(d: Date, unit: Granularity['fine']): string {
+  switch (unit) {
+    case 'day':     return String(d.getUTCDate())
+    case 'week':    return `W${Math.ceil(d.getUTCDate() / 7)}`
+    case 'month':   return d.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' })
+    case 'quarter': return `Q${Math.floor(d.getUTCMonth() / 3) + 1}`
+  }
+}
+
+function coarseLabel(d: Date, unit: Granularity['coarse']): string {
+  switch (unit) {
+    case 'month': return d.toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' })
+    case 'year':  return String(d.getUTCFullYear())
+  }
+}
+
+function svgEl<K extends keyof SVGElementTagNameMap>(tag: K): SVGElementTagNameMap[K] {
+  return document.createElementNS('http://www.w3.org/2000/svg', tag)
 }
 
 function renderDateAxis(
   g: SVGGElement,
-  sectionStart: Date | null,
-  totalWidth: number,
+  sectionStart: Date,
+  canvasWidth: number,
   pxPerDay: number,
 ): void {
-  if (!sectionStart) return
+  const gr = granularity(pxPerDay)
+  const totalDays = canvasWidth / pxPerDay
 
-  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
-  bg.setAttribute('x', '0')
-  bg.setAttribute('y', '0')
-  bg.setAttribute('width', String(totalWidth))
+  // Background
+  const bg = svgEl('rect')
+  bg.setAttribute('x', '0'); bg.setAttribute('y', '0')
+  bg.setAttribute('width', String(canvasWidth + 200))
   bg.setAttribute('height', String(DATE_BAR_H))
   bg.setAttribute('fill', '#f8fafc')
   g.appendChild(bg)
 
-  const bottomLine = document.createElementNS('http://www.w3.org/2000/svg', 'line')
-  bottomLine.setAttribute('x1', '0')
-  bottomLine.setAttribute('y1', String(DATE_BAR_H))
-  bottomLine.setAttribute('x2', String(totalWidth))
-  bottomLine.setAttribute('y2', String(DATE_BAR_H))
-  bottomLine.setAttribute('stroke', '#e2e8f0')
-  bottomLine.setAttribute('stroke-width', '1')
-  g.appendChild(bottomLine)
+  // Bottom border line
+  const border = svgEl('line')
+  border.setAttribute('x1', '0'); border.setAttribute('y1', String(DATE_BAR_H))
+  border.setAttribute('x2', String(canvasWidth + 200)); border.setAttribute('y2', String(DATE_BAR_H))
+  border.setAttribute('stroke', '#e2e8f0'); border.setAttribute('stroke-width', '1')
+  g.appendChild(border)
 
-  // Tick marks at month boundaries
-  const cursor = new Date(sectionStart)
-  cursor.setUTCDate(1)
-  // start a month back so first label is visible
-  const endDate = new Date(sectionStart.getTime() + (totalWidth / pxPerDay) * 86_400_000)
+  // Mid divider between coarse/fine rows
+  const mid = svgEl('line')
+  mid.setAttribute('x1', '0'); mid.setAttribute('y1', String(COARSE_H))
+  mid.setAttribute('x2', String(canvasWidth + 200)); mid.setAttribute('y2', String(COARSE_H))
+  mid.setAttribute('stroke', '#e2e8f0'); mid.setAttribute('stroke-width', '1')
+  g.appendChild(mid)
 
-  while (cursor <= endDate) {
-    const days = (cursor.getTime() - sectionStart.getTime()) / 86_400_000
-    const tickX = SECTION_H_PAD + days * pxPerDay
+  function xOf(d: Date): number {
+    return SECTION_H_PAD + ((d.getTime() - sectionStart.getTime()) / MS) * pxPerDay
+  }
 
-    const tick = document.createElementNS('http://www.w3.org/2000/svg', 'line')
-    tick.setAttribute('x1', String(tickX))
-    tick.setAttribute('y1', String(DATE_BAR_H - 8))
-    tick.setAttribute('x2', String(tickX))
-    tick.setAttribute('y2', String(DATE_BAR_H))
-    tick.setAttribute('stroke', '#94a3b8')
-    tick.setAttribute('stroke-width', '1')
-    g.appendChild(tick)
+  // ── Coarse row ─────────────────────────────────────────────────────────────
+  {
+    let d = snapTo(sectionStart, gr.coarse)
+    if (d > sectionStart) d = snapTo(addDays(sectionStart, -1), gr.coarse)
+    const end = addDays(sectionStart, totalDays + 60)
 
-    const lbl = document.createElementNS('http://www.w3.org/2000/svg', 'text')
-    lbl.setAttribute('x', String(tickX + 4))
-    lbl.setAttribute('y', String(DATE_BAR_H - 12))
-    lbl.setAttribute('fill', '#64748b')
-    lbl.setAttribute('font-size', '10')
-    lbl.textContent = formatMonth(cursor)
-    g.appendChild(lbl)
+    while (d <= end) {
+      const x = Math.max(0, xOf(d))
+      const next = advanceToNext(d, gr.coarse)
+      const xNext = xOf(next)
+      const w = Math.max(0, xNext - x)
 
-    cursor.setUTCMonth(cursor.getUTCMonth() + 1)
+      if (x < canvasWidth + 200) {
+        // Vertical separator
+        if (x > 0) {
+          const sep = svgEl('line')
+          sep.setAttribute('x1', String(x)); sep.setAttribute('y1', '0')
+          sep.setAttribute('x2', String(x)); sep.setAttribute('y2', String(COARSE_H))
+          sep.setAttribute('stroke', '#cbd5e1'); sep.setAttribute('stroke-width', '1')
+          g.appendChild(sep)
+        }
+        // Label centred in band
+        const lbl = svgEl('text')
+        lbl.setAttribute('x', String(x + Math.min(w, canvasWidth + 200 - x) / 2))
+        lbl.setAttribute('y', String(COARSE_H / 2 + 4))
+        lbl.setAttribute('text-anchor', 'middle')
+        lbl.setAttribute('fill', '#475569'); lbl.setAttribute('font-size', '11')
+        lbl.setAttribute('font-weight', '600')
+        lbl.textContent = coarseLabel(d, gr.coarse)
+        g.appendChild(lbl)
+      }
+      d = next
+    }
+  }
+
+  // ── Fine row ────────────────────────────────────────────────────────────────
+  {
+    let d = snapTo(sectionStart, gr.fine)
+    if (d > sectionStart) d = snapTo(addDays(sectionStart, -1), gr.fine)
+    const end = addDays(sectionStart, totalDays + 60)
+
+    while (d <= end) {
+      const x = xOf(d)
+      const next = advanceToNext(d, gr.fine)
+      const xNext = xOf(next)
+      const bandW = xNext - x
+
+      if (x < canvasWidth + 200 && xNext > 0) {
+        // Tick + separator
+        const sep = svgEl('line')
+        sep.setAttribute('x1', String(x)); sep.setAttribute('y1', String(COARSE_H))
+        sep.setAttribute('x2', String(x)); sep.setAttribute('y2', String(DATE_BAR_H))
+        sep.setAttribute('stroke', '#e2e8f0'); sep.setAttribute('stroke-width', '1')
+        g.appendChild(sep)
+
+        // Label — only if band is wide enough
+        if (bandW > 18) {
+          const lbl = svgEl('text')
+          lbl.setAttribute('x', String(x + Math.min(bandW, 200) / 2))
+          lbl.setAttribute('y', String(COARSE_H + (DATE_BAR_H - COARSE_H) / 2 + 4))
+          lbl.setAttribute('text-anchor', 'middle')
+          lbl.setAttribute('fill', '#64748b'); lbl.setAttribute('font-size', '10')
+          lbl.textContent = fineLabel(d, gr.fine)
+          g.appendChild(lbl)
+        }
+      }
+      d = next
+    }
   }
 }
 
@@ -84,57 +191,35 @@ function startInlineEdit(
 ): void {
   if (rt.raw.type !== 'task') return
 
-  const rect = labelEl.getBoundingClientRect()
-  const svgRect = svgEl.getBoundingClientRect()
-
-  // Check if an edit is already open
   const existing = document.getElementById('inline-title-input')
   if (existing) existing.remove()
 
-  const input = document.createElement('input')
-  input.id = 'inline-title-input'
-  input.value = rt.raw.name
-  input.style.position = 'fixed'
-  input.style.left   = String(rect.left - 4) + 'px'
-  input.style.top    = String(rect.top  - 4) + 'px'
-  input.style.width  = String(Math.max(rect.width + 8, 120)) + 'px'
-  input.style.height = '22px'
-  input.style.fontSize = '12px'
-  input.style.fontFamily = 'system-ui, sans-serif'
-  input.style.textAlign = 'center'
-  input.style.border = '2px solid #2563eb'
-  input.style.borderRadius = '4px'
-  input.style.padding = '0 4px'
-  input.style.outline = 'none'
-  input.style.zIndex = '200'
-  input.style.background = '#fff'
-  input.style.color = '#111'
+  const rect    = labelEl.getBoundingClientRect()
+  const input   = document.createElement('input')
+  input.id      = 'inline-title-input'
+  input.value   = rt.raw.name
+  input.style.cssText = [
+    `position:fixed`,
+    `left:${rect.left - 4}px`, `top:${rect.top - 4}px`,
+    `width:${Math.max(rect.width + 8, 120)}px`, `height:22px`,
+    `font:12px system-ui,sans-serif`,
+    `border:2px solid #2563eb`, `border-radius:4px`,
+    `padding:0 4px`, `outline:none`, `z-index:200`,
+    `background:#fff`, `color:#111`,
+  ].join(';')
 
-  // Hide the SVG text while editing
   labelEl.style.display = 'none'
-
-  // Prevent SVG pan from stealing pointer events
-  const stopProp = (e: Event) => e.stopPropagation()
-  input.addEventListener('pointerdown', stopProp)
-  input.addEventListener('pointermove', stopProp)
-
-  void svgRect  // keep reference alive
+  const stop = (e: Event) => e.stopPropagation()
+  input.addEventListener('pointerdown', stop)
+  input.addEventListener('pointermove', stop)
+  void svgEl
 
   const commit = () => {
     const val = input.value.trim()
-    if (val) {
-      (rt.raw as TicketTask).name = val
-      project.dirty = true
-    }
-    input.remove()
-    labelEl.style.display = ''
-    onCommit()
+    if (val) { (rt.raw as TicketTask).name = val; project.dirty = true }
+    input.remove(); labelEl.style.display = ''; onCommit()
   }
-
-  const cancel = () => {
-    input.remove()
-    labelEl.style.display = ''
-  }
+  const cancel = () => { input.remove(); labelEl.style.display = '' }
 
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') commit()
@@ -142,51 +227,99 @@ function startInlineEdit(
     e.stopPropagation()
   })
   input.addEventListener('blur', commit)
-
   document.body.appendChild(input)
-  input.focus()
-  input.select()
+  input.focus(); input.select()
 }
 
-// ─── Order string helpers ─────────────────────────────────────────────────────
+// ─── Screen → content coordinates ────────────────────────────────────────────
 
-function nextOrderAfter(order: string): string {
-  // Append 'm' — lexicographically between `order` and `order` with next char
-  return order + 'm'
+function screenToContent(
+  svg: SVGSVGElement,
+  clientX: number, clientY: number,
+  panX: number, panY: number,
+): { x: number; y: number } {
+  const r  = svg.getBoundingClientRect()
+  const vb = svg.viewBox.baseVal
+  if (!vb || vb.width === 0) return { x: clientX - panX, y: clientY - panY }
+  const sx = vb.width  / r.width
+  const sy = vb.height / r.height
+  return {
+    x: (clientX - r.left) * sx - panX,
+    y: (clientY - r.top)  * sy - DATE_BAR_H - panY,
+  }
 }
+
+// ─── Order string ─────────────────────────────────────────────────────────────
+
+function orderAfter(order: string): string { return order + 'm' }
 
 // ─── GanttView ────────────────────────────────────────────────────────────────
 
+type PlacementState = {
+  data: NewTaskData
+  snapTargetId: NodeId | null
+  snapSide: 'after' | 'before'
+}
+
 export class GanttView {
+  private container: HTMLElement
   private svg: SVGSVGElement
-  private root: SVGGElement
+  private defs: SVGDefsElement
+  private axisG: SVGGElement    // only panX applied
+  private contentG: SVGGElement // panX + panY applied
+  private ghostG: SVGGElement   // fixed overlay for placement ghost
+
   private project: Project
+  private formatBar: FormatBar
   private drillStack: Array<{ parentId: NodeId | null; label: string }> = []
   private currentParent: NodeId | null = null
   private selectedId: NodeId | null = null
-  private formatBar: FormatBar
-  private pxPerDay: number = PX_PER_DAY
+  private pxPerDay = PX_PER_DAY
   private panX = 0
   private panY = 0
   private isPanning = false
   private lastPointer = { x: 0, y: 0 }
   private pendingEditId: NodeId | null = null
+  private placement: PlacementState | null = null
+
+  // Cached layout info used by placement ghost
+  private lastLayouts: SectionLayout[] = []
 
   constructor(container: HTMLElement, project: Project, formatBar: FormatBar) {
-    this.project = project
+    this.container = container
+    this.project   = project
     this.formatBar = formatBar
     this.formatBar.bind(project, () => this.render())
 
     container.innerHTML = ''
-    this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
-    this.svg.setAttribute('id', 'gantt-svg')
-    this.svg.style.width  = '100%'
-    this.svg.style.height = '100%'
-    this.svg.style.display = 'block'
+
+    this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg') as SVGSVGElement
+    this.svg.style.cssText = 'width:100%;height:100%;display:block;'
     container.appendChild(this.svg)
 
-    this.root = document.createElementNS('http://www.w3.org/2000/svg', 'g')
-    this.svg.appendChild(this.root)
+    this.defs = svgEl('defs')
+    this.svg.appendChild(this.defs)
+
+    this.axisG    = svgEl('g')
+    this.contentG = svgEl('g')
+    this.ghostG   = svgEl('g')
+    this.ghostG.setAttribute('pointer-events', 'none')
+
+    this.svg.appendChild(this.axisG)
+    this.svg.appendChild(this.contentG)
+    this.svg.appendChild(this.ghostG)
+
+    // Clip path so content never scrolls under the axis
+    const clip = svgEl('clipPath')
+    clip.setAttribute('id', 'content-clip')
+    const clipRect = svgEl('rect')
+    clipRect.setAttribute('x', '-10000')
+    clipRect.setAttribute('y', String(DATE_BAR_H))
+    clipRect.setAttribute('width', '20000')
+    clipRect.setAttribute('height', '99999')
+    clip.appendChild(clipRect)
+    this.defs.appendChild(clip)
+    this.contentG.setAttribute('clip-path', 'url(#content-clip)')
 
     this.drillStack = [{ parentId: null, label: project.meta.name }]
     this.render()
@@ -196,86 +329,77 @@ export class GanttView {
   // ─── Rendering ──────────────────────────────────────────────────────────────
 
   render() {
-    this.root.innerHTML = ''
+    this.axisG.innerHTML    = ''
+    this.contentG.innerHTML = ''
+    this.ghostG.innerHTML   = ''
 
     const layouts = buildLayout(this.project, this.currentParent, this.pxPerDay)
-    if (layouts.length === 0) return
+    this.lastLayouts = layouts
 
-    // Compute earliest section start date for date axis
-    let sectionStartDate: Date | null = null
-    for (const sec of layouts) {
-      for (const node of sec.nodes) {
-        const rt = this.project.tasks.get(node.id)
-        if (rt?.computed && (!sectionStartDate || rt.computed.start < sectionStartDate)) {
-          sectionStartDate = rt.computed.start
-        }
-      }
-    }
-
-    let totalW = 0
-    let maxH = 0
+    // Find earliest date for axis alignment
+    let sectionStart: Date | null = null
+    let totalW = 0, maxH = 0
     for (const sec of layouts) {
       totalW += sec.width
-      if (sec.height > maxH) maxH = sec.height
+      maxH = Math.max(maxH, sec.height)
+      for (const node of sec.nodes) {
+        const c = this.project.tasks.get(node.id)?.computed
+        if (c && (!sectionStart || c.start < sectionStart)) sectionStart = c.start
+      }
     }
-    totalW += 120  // right margin
+    const canvasW = totalW + 200
+    const canvasH = DATE_BAR_H + OUTER_PAD + maxH + ROW_STRIDE + 60
+    this.svg.setAttribute('viewBox', `0 0 ${canvasW} ${canvasH}`)
 
-    const canvasH = maxH + DATE_BAR_H + OUTER_PAD + 60
+    // ── Date axis ────────────────────────────────────────────────────────────
+    if (sectionStart) {
+      renderDateAxis(this.axisG, sectionStart, totalW, this.pxPerDay)
+    }
 
-    // Date axis group (fixed — not translated with content)
-    const dateAxisG = document.createElementNS('http://www.w3.org/2000/svg', 'g')
-    renderDateAxis(dateAxisG, sectionStartDate, totalW, this.pxPerDay)
-    this.root.appendChild(dateAxisG)
+    // ── Background (deselect on click) ────────────────────────────────────────
+    const bg = svgEl('rect')
+    bg.setAttribute('x', '0'); bg.setAttribute('y', String(DATE_BAR_H))
+    bg.setAttribute('width', String(canvasW)); bg.setAttribute('height', String(canvasH))
+    bg.setAttribute('fill', 'transparent')
+    bg.addEventListener('click', () => {
+      if (this.placement) { this.commitPlacement(null); return }
+      this.selectTask(null)
+    })
+    this.contentG.appendChild(bg)
 
-    // Click canvas background to deselect
-    const bgRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
-    bgRect.setAttribute('x', '0')
-    bgRect.setAttribute('y', String(DATE_BAR_H))
-    bgRect.setAttribute('width', String(totalW))
-    bgRect.setAttribute('height', String(canvasH))
-    bgRect.setAttribute('fill', 'transparent')
-    bgRect.addEventListener('click', () => this.selectTask(null))
-    this.root.appendChild(bgRect)
-
-    // Content group (tasks sit below date bar + outer pad)
-    const contentG = document.createElementNS('http://www.w3.org/2000/svg', 'g')
-    contentG.setAttribute('transform', `translate(0, ${DATE_BAR_H + OUTER_PAD})`)
-
+    // ── Task sections ─────────────────────────────────────────────────────────
+    const contentOffset = DATE_BAR_H + OUTER_PAD
     let xCursor = 0
     for (const sec of layouts) {
-      this.renderSection(sec, xCursor, contentG, maxH)
+      this.renderSection(sec, xCursor, contentOffset, maxH)
       xCursor += sec.width
     }
 
-    this.root.appendChild(contentG)
-    this.svg.setAttribute('viewBox', `0 0 ${totalW} ${canvasH}`)
-    this.applyTransform()
+    // ── Placement ghost ───────────────────────────────────────────────────────
+    if (this.placement) this.renderGhost()
 
-    // Trigger inline edit on newly created task
+    // ── Pending inline edit ───────────────────────────────────────────────────
     if (this.pendingEditId) {
-      const labelEl = this.svg.querySelector<SVGTextElement>(
+      const el = this.svg.querySelector<SVGTextElement>(
         `.task-name-label[data-id="${this.pendingEditId}"]`
       )
-      if (labelEl) {
+      if (el) {
         const taskRT = this.project.tasks.get(this.pendingEditId)!
-        startInlineEdit(labelEl, this.svg, taskRT, this.project, () => this.render())
+        startInlineEdit(el, this.svg, taskRT, this.project, () => this.render())
       }
       this.pendingEditId = null
     }
+
+    this.applyTransform()
   }
 
   private renderSection(
-    sec: ReturnType<typeof buildLayout>[0],
-    xOff: number,
-    parent: SVGGElement,
-    sectionHeight: number,
+    sec: SectionLayout, xOff: number, yOff: number, sectionH: number,
   ) {
-    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g')
-    g.setAttribute('transform', `translate(${xOff}, 0)`)
+    const g = svgEl('g')
+    g.setAttribute('transform', `translate(${xOff}, ${yOff})`)
 
     const nodeMap = new Map<string, LayoutNode>(sec.nodes.map(n => [n.id, n]))
-
-    // Connectors behind tasks
     for (const p of renderConnectors(sec.connectors, nodeMap, 0)) g.appendChild(p)
 
     for (const node of sec.nodes) {
@@ -283,82 +407,262 @@ export class GanttView {
       if (!rt) continue
 
       if (rt.raw.type === 'milestone') {
-        const milestoneColor = rt.raw.style.background || '#7c3aed'
         const flag = renderMilestoneFlag(
-          node, rt.raw.name, 0, sectionHeight, milestoneColor,
+          node, rt.raw.name, 0, sectionH,
+          rt.raw.style.background || '#7c3aed',
           () => this.drillInto(node.id, rt.raw.name),
         )
+        // Highlight snap target in placement mode
+        if (this.placement?.snapTargetId === node.id) {
+          flag.style.filter = 'brightness(1.3)'
+        }
         g.appendChild(flag)
       } else {
+        const isSnap   = this.placement?.snapTargetId === node.id
+        const snapSide = this.placement?.snapSide ?? 'after'
+
         const block = renderTaskBlock(
           node, rt, this.project, 0,
           this.selectedId === node.id,
-          () => this.selectTask(node.id),
-          () => openDetailModal(rt, this.project, () => this.render()),
+          () => {
+            if (this.placement) { this.commitPlacement(node.id); return }
+            this.selectTask(node.id)
+          },
+          () => {
+            if (!this.placement) openDetailModal(rt, this.project, () => this.render())
+          },
           (labelEl) => startInlineEdit(labelEl, this.svg, rt, this.project, () => this.render()),
           () => this.addTask(node.id, 'after'),
           () => this.addTask(node.id, 'before'),
         )
+
+        // Snap highlight overlay in placement mode
+        if (isSnap) {
+          const hl = svgEl('rect')
+          hl.setAttribute('x', String(node.x + (snapSide === 'after' ? node.width * 0.5 : 0)))
+          hl.setAttribute('y', String(node.y - 2))
+          hl.setAttribute('width', String(node.width * 0.5 + 4))
+          hl.setAttribute('height', String(TASK_HEIGHT + 4))
+          hl.setAttribute('rx', '6')
+          hl.setAttribute('fill', '#2563eb')
+          hl.setAttribute('opacity', '0.25')
+          hl.setAttribute('pointer-events', 'none')
+          block.appendChild(hl)
+        }
+
+        // In placement mode, hover sets snap target
+        if (this.placement) {
+          block.style.cursor = 'crosshair'
+          block.addEventListener('mousemove', (e) => {
+            const br = block.getBoundingClientRect()
+            const side: 'before' | 'after' = e.clientX < br.left + br.width / 2 ? 'before' : 'after'
+            if (
+              this.placement?.snapTargetId !== node.id ||
+              this.placement?.snapSide !== side
+            ) {
+              this.placement!.snapTargetId = node.id
+              this.placement!.snapSide = side
+              this.render()
+            }
+          })
+          block.addEventListener('mouseleave', () => {
+            if (this.placement?.snapTargetId === node.id) {
+              this.placement!.snapTargetId = null
+              this.render()
+            }
+          })
+        }
+
         g.appendChild(block)
       }
     }
+    this.contentG.appendChild(g)
+  }
 
-    parent.appendChild(g)
+  private renderGhost() {
+    if (!this.placement) return
+    const { data } = this.placement
+    const ghostW = Math.max(data.duration * this.pxPerDay, 80)
+    const ghostH = TASK_HEIGHT
+
+    const g = svgEl('g')
+    g.setAttribute('id', 'placement-ghost')
+
+    const rect = svgEl('rect')
+    rect.setAttribute('width', String(ghostW))
+    rect.setAttribute('height', String(ghostH))
+    rect.setAttribute('rx', '6')
+    rect.setAttribute('fill', '#2563eb')
+    rect.setAttribute('opacity', '0.15')
+    rect.setAttribute('stroke', '#2563eb')
+    rect.setAttribute('stroke-width', '2')
+    rect.setAttribute('stroke-dasharray', '6 3')
+
+    const lbl = svgEl('text')
+    lbl.setAttribute('x', '8')
+    lbl.setAttribute('y', String(ghostH / 2 + 4))
+    lbl.setAttribute('fill', '#1d4ed8')
+    lbl.setAttribute('font-size', '12')
+    lbl.setAttribute('font-weight', '500')
+    lbl.textContent = data.name
+
+    g.appendChild(rect); g.appendChild(lbl)
+
+    // Position ghost at snap target + side, or at centre of viewport
+    const layouts = this.lastLayouts
+    const snap = this.placement.snapTargetId
+    let placed = false
+
+    if (snap) {
+      for (const sec of layouts) {
+        const node = sec.nodes.find(n => n.id === snap)
+        if (node) {
+          const absX = sec.xOffset + node.x +
+            (this.placement.snapSide === 'after' ? node.width + 16 : -ghostW - 16)
+          const absY = node.y
+          // Convert from content space to SVG space (add panX and offset)
+          const svgX = this.panX + absX
+          const svgY = this.panY + DATE_BAR_H + OUTER_PAD + absY
+          g.setAttribute('transform', `translate(${svgX}, ${svgY})`)
+          placed = true
+
+          // Preview connector
+          const cx1 = this.placement.snapSide === 'after'
+            ? svgX - 16 : svgX + ghostW + 16
+          const cy1 = svgY + ghostH / 2
+          const cx2 = this.placement.snapSide === 'after'
+            ? svgX : svgX + ghostW
+          const cy2 = svgY + ghostH / 2
+          const line = svgEl('line')
+          line.setAttribute('x1', String(cx1)); line.setAttribute('y1', String(cy1))
+          line.setAttribute('x2', String(cx2)); line.setAttribute('y2', String(cy2))
+          line.setAttribute('stroke', '#2563eb'); line.setAttribute('stroke-width', '2')
+          line.setAttribute('stroke-dasharray', '5 3')
+          this.ghostG.appendChild(line)
+          break
+        }
+      }
+    }
+
+    if (!placed) {
+      // Float near top-centre of viewport
+      const vb = this.svg.viewBox.baseVal
+      const cx = vb ? vb.width / 2 : 400
+      g.setAttribute('transform', `translate(${cx - ghostW / 2}, ${DATE_BAR_H + OUTER_PAD + 20})`)
+    }
+
+    this.ghostG.appendChild(g)
   }
 
   // ─── Task creation ───────────────────────────────────────────────────────────
 
-  addTaskToCurrentSection() {
-    const siblings = this.currentParent === null
-      ? this.project.roots
-      : (this.project.tasks.get(this.currentParent)?.children ?? [])
-
-    // Insert after the last non-milestone task, or at end
-    const lastTask = [...siblings].reverse().find(s => s.raw.type === 'task')
-    const afterId = lastTask?.raw.id ?? null
-    this.addTask(afterId, 'after')
+  /** Called by the toolbar "Add Task" button — opens modal then enters placement mode. */
+  openAddTaskModal() {
+    openAddTaskModal(
+      (data) => this.enterPlacementMode(data),
+      () => { /* cancelled */ },
+    )
   }
 
-  private addTask(afterId: NodeId | null, _direction: 'after' | 'before') {
+  private enterPlacementMode(data: NewTaskData) {
+    this.placement = { data, snapTargetId: null, snapSide: 'after' }
+    this.container.classList.add('placing')
+    document.dispatchEvent(new CustomEvent('planar:placement', { detail: { active: true, hint: 'Click a task to place after it (left half = before), or click empty space to append. Esc to cancel.' } }))
+    this.render()
+  }
+
+  private exitPlacementMode() {
+    this.placement = null
+    this.container.classList.remove('placing')
+    document.dispatchEvent(new CustomEvent('planar:placement', { detail: { active: false, hint: '' } }))
+    this.render()
+  }
+
+  private commitPlacement(targetId: NodeId | null) {
+    if (!this.placement) return
+    const { data, snapSide } = this.placement
+    const afterId = targetId && snapSide === 'after' ? targetId : null
+    const beforeId = targetId && snapSide === 'before' ? targetId : null
+    this.exitPlacementMode()
+    this.createTask(data, afterId, beforeId)
+  }
+
+  private createTask(data: NewTaskData, afterId: NodeId | null, beforeId: NodeId | null) {
     const siblings = this.currentParent === null
       ? this.project.roots
       : (this.project.tasks.get(this.currentParent)?.children ?? [])
 
     const today = new Date().toISOString().split('T')[0]
-    const id = newTaskId()
+    const id    = newTaskId()
 
-    let order = 'a0'
+    // Determine insertion order and prerequisites
+    let order: string
     let prereqs: NodeId[] = []
 
     if (afterId) {
-      const afterRT = this.project.tasks.get(afterId)
-      if (afterRT) {
-        order = nextOrderAfter(afterRT.raw.order)
-        if (afterRT.raw.type === 'task') prereqs = [afterId]
+      const afterRT  = this.project.tasks.get(afterId)
+      const afterIdx = siblings.findIndex(s => s.raw.id === afterId)
+      order   = orderAfter(afterRT?.raw.order ?? 'a0')
+      prereqs = [afterId]
+
+      // Thread: successors of afterId now point to the new task (#3)
+      const successors = siblings.filter(s =>
+        s.raw.id !== id && s.raw.prerequisites.includes(afterId)
+      )
+      for (const succ of successors) {
+        succ.raw.prerequisites = succ.raw.prerequisites.map(p => p === afterId ? id : p)
       }
-    } else if (siblings.length > 0) {
-      order = nextOrderAfter(siblings[siblings.length - 1].raw.order)
-    }
 
-    const raw: TicketTask = {
-      id, name: 'New Task', type: 'task',
-      parent: this.currentParent,
-      order,
-      timeMode: 'duration', duration: 7, start: today,
-      prerequisites: prereqs,
-      assignees: [],
-      status: 'todo', ticket: null,
-      style: { background: '#334155', text: '#f1f5f9' },
-    }
-    const rt: RuntimeTask = { raw, children: [], computed: null }
+      const raw: TicketTask = {
+        id, name: data.name, type: 'task',
+        parent: this.currentParent, order,
+        timeMode: 'duration', duration: data.duration, start: today,
+        prerequisites: prereqs,
+        assignees: [], status: 'todo', ticket: data.ticket,
+        style: { background: '#334155', text: '#f1f5f9' },
+      }
+      const rt: RuntimeTask = { raw, children: [], computed: null }
+      this.project.tasks.set(id, rt)
+      siblings.splice(afterIdx + 1, 0, rt)
 
-    this.project.tasks.set(id, rt)
+    } else if (beforeId) {
+      const beforeRT  = this.project.tasks.get(beforeId)
+      const beforeIdx = siblings.findIndex(s => s.raw.id === beforeId)
+      // New task takes the beforeId's prereqs; beforeId now depends on new task
+      const prevPrereqs = beforeRT?.raw.prerequisites ?? []
+      order   = String(beforeRT?.raw.order ?? 'a0') + 'a'  // sort before
+      prereqs = [...prevPrereqs]
 
-    // Insert into siblings at right position (after `afterId` or at end)
-    if (afterId) {
-      const idx = siblings.findIndex(s => s.raw.id === afterId)
-      siblings.splice(idx + 1, 0, rt)
+      if (beforeRT) beforeRT.raw.prerequisites = [id]
+
+      const raw: TicketTask = {
+        id, name: data.name, type: 'task',
+        parent: this.currentParent, order,
+        timeMode: 'duration', duration: data.duration, start: today,
+        prerequisites: prereqs,
+        assignees: [], status: 'todo', ticket: data.ticket,
+        style: { background: '#334155', text: '#f1f5f9' },
+      }
+      const rt: RuntimeTask = { raw, children: [], computed: null }
+      this.project.tasks.set(id, rt)
+      siblings.splice(beforeIdx, 0, rt)
+
     } else {
+      // Append to end
+      const last  = siblings[siblings.length - 1]
+      order  = last ? orderAfter(last.raw.order) : 'a0'
+      prereqs = last && last.raw.type === 'task' ? [last.raw.id] : []
+
+      const raw: TicketTask = {
+        id, name: data.name, type: 'task',
+        parent: this.currentParent, order,
+        timeMode: 'duration', duration: data.duration, start: today,
+        prerequisites: prereqs,
+        assignees: [], status: 'todo', ticket: data.ticket,
+        style: { background: '#334155', text: '#f1f5f9' },
+      }
+      const rt: RuntimeTask = { raw, children: [], computed: null }
+      this.project.tasks.set(id, rt)
       siblings.push(rt)
     }
 
@@ -368,11 +672,19 @@ export class GanttView {
     this.render()
   }
 
+  /** Quick inline add from the + hover buttons — uses threading. */
+  addTask(adjacentId: NodeId, direction: 'after' | 'before') {
+    this.createTask({ name: 'New Task', duration: 7, ticket: null },
+      direction === 'after' ? adjacentId : null,
+      direction === 'before' ? adjacentId : null,
+    )
+  }
+
   // ─── Selection ───────────────────────────────────────────────────────────────
 
   private selectTask(id: NodeId | null) {
     this.selectedId = id
-    const rt = id ? this.project.tasks.get(id) ?? null : null
+    const rt = id ? (this.project.tasks.get(id) ?? null) : null
     this.formatBar.selectTask(rt)
     this.render()
   }
@@ -415,12 +727,14 @@ export class GanttView {
   // ─── Pan / zoom ──────────────────────────────────────────────────────────────
 
   private applyTransform() {
-    this.root.setAttribute('transform', `translate(${this.panX}, ${this.panY})`)
+    this.axisG.setAttribute('transform', `translate(${this.panX}, 0)`)
+    this.contentG.setAttribute('transform', `translate(${this.panX}, ${this.panY})`)
   }
 
   private bindEvents(container: HTMLElement) {
     container.addEventListener('pointerdown', (e) => {
       if ((e.target as Element).closest('.task-block, .milestone-flag, .add-btn')) return
+      if (this.placement) return  // let click bubble to bg rect
       this.isPanning = true
       this.lastPointer = { x: e.clientX, y: e.clientY }
       container.classList.add('panning')
@@ -443,7 +757,7 @@ export class GanttView {
       e.preventDefault()
       if (e.shiftKey) {
         const factor = e.deltaY < 0 ? 1.12 : 0.9
-        this.pxPerDay = Math.max(2, Math.min(40, this.pxPerDay * factor))
+        this.pxPerDay = Math.max(1.5, Math.min(60, this.pxPerDay * factor))
         this.render()
       } else {
         this.panX -= e.deltaX
@@ -451,9 +765,23 @@ export class GanttView {
         this.applyTransform()
       }
     }, { passive: false })
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this.placement) {
+        this.exitPlacementMode()
+      }
+    })
+
+    // Ghost follows mouse in placement mode
+    container.addEventListener('mousemove', (e) => {
+      if (!this.placement || this.placement.snapTargetId) return
+      // Ghost is already positioned to snap target when snap is active.
+      // When no snap target, update ghost position each frame (lightweight: just re-render).
+      void screenToContent(this.svg, e.clientX, e.clientY, this.panX, this.panY)
+    })
   }
 
-  zoomIn()    { this.pxPerDay = Math.min(40, this.pxPerDay * 1.2); this.render() }
-  zoomOut()   { this.pxPerDay = Math.max(2,  this.pxPerDay / 1.2); this.render() }
+  zoomIn()    { this.pxPerDay = Math.min(60,  this.pxPerDay * 1.2); this.render() }
+  zoomOut()   { this.pxPerDay = Math.max(1.5, this.pxPerDay / 1.2); this.render() }
   zoomReset() { this.pxPerDay = PX_PER_DAY; this.panX = 0; this.panY = 0; this.render() }
 }
