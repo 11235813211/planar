@@ -1,33 +1,27 @@
-import type { Project, NodeId, ScheduleConflict } from '../types'
+import type { Project, NodeId, RuntimeTask, ScheduleConflict } from '../types'
 
 const MS_PER_DAY = 86_400_000
 
-function parseDate(s: string): Date {
-  return new Date(s + 'T00:00:00Z')
+function parseDate(s: string): Date { return new Date(s + 'T00:00:00Z') }
+function addDays(d: Date, days: number): Date { return new Date(d.getTime() + days * MS_PER_DAY) }
+
+/** Prerequisites of any node (task or milestone). */
+function prereqsOf(project: Project, id: NodeId): NodeId[] {
+  return project.tasks.get(id)?.raw.prerequisites
+    ?? project.milestones.get(id)?.raw.prerequisites
+    ?? []
 }
 
-function addDays(d: Date, days: number): Date {
-  return new Date(d.getTime() + days * MS_PER_DAY)
-}
-
-function daysBetween(a: Date, b: Date): number {
-  return Math.round((b.getTime() - a.getTime()) / MS_PER_DAY)
-}
-
-/**
- * Topological sort of all tasks across the entire project.
- * Returns ids in dependency-first order.
- */
+/** Topological sort over the combined task + milestone prerequisite graph. */
 function topoSort(project: Project): NodeId[] {
   const inDegree = new Map<NodeId, number>()
   const adj = new Map<NodeId, NodeId[]>()
 
-  for (const id of project.tasks.keys()) {
-    inDegree.set(id, 0)
-    adj.set(id, [])
-  }
-  for (const [id, rt] of project.tasks) {
-    for (const pre of rt.raw.prerequisites) {
+  const allIds = [...project.tasks.keys(), ...project.milestones.keys()]
+  for (const id of allIds) { inDegree.set(id, 0); adj.set(id, []) }
+  for (const id of allIds) {
+    for (const pre of prereqsOf(project, id)) {
+      if (!adj.has(pre)) continue
       adj.get(pre)!.push(id)
       inDegree.set(id, inDegree.get(id)! + 1)
     }
@@ -47,71 +41,82 @@ function topoSort(project: Project): NodeId[] {
   return order
 }
 
-/**
- * Compute start/end for every task and detect conflicts.
- * Mutates rt.computed in-place; returns any detected conflicts.
- */
-export function schedule(project: Project): ScheduleConflict[] {
-  const order = topoSort(project)
-  const conflicts: ScheduleConflict[] = []
-
-  // Compute earliest-possible start for each task based on prerequisites
-  const earliestEnd = new Map<NodeId, Date>()
-
-  for (const id of order) {
-    const rt = project.tasks.get(id)!
-    const raw = rt.raw
-
-    // Earliest start = max end of all prerequisites
-    let prereqEnd: Date | null = null
-    for (const pre of raw.prerequisites) {
-      const e = earliestEnd.get(pre)
-      if (e) {
-        if (!prereqEnd || e > prereqEnd) prereqEnd = e
+/** Bottom-up: a container's span is the envelope of its children. */
+function resolveContainers(project: Project): void {
+  const visit = (rt: RuntimeTask) => {
+    for (const c of rt.children) visit(c)
+    if (rt.raw.type === 'container' && rt.children.length > 0) {
+      let start: Date | null = null, end: Date | null = null
+      for (const c of rt.children) {
+        if (!c.computed) continue
+        if (!start || c.computed.start < start) start = c.computed.start
+        if (!end   || c.computed.end   > end)   end   = c.computed.end
       }
-    }
-
-    if (raw.type === 'milestone') {
-      let milestoneDate: Date
-      if (raw.timeMode === 'date' && raw.date) {
-        milestoneDate = parseDate(raw.date)
-        // Conflict check: did prerequisites finish before this date?
-        if (prereqEnd && prereqEnd > milestoneDate) {
-          conflicts.push({
-            milestoneId: id,
-            milestoneName: raw.name,
-            overflowDays: daysBetween(milestoneDate, prereqEnd),
-          })
-        }
-      } else {
-        // Duration mode milestone: place immediately after prerequisites
-        milestoneDate = prereqEnd ?? new Date()
-      }
-      rt.computed = { start: milestoneDate, end: milestoneDate, durationDays: 0 }
-      earliestEnd.set(id, milestoneDate)
-    } else {
-      // TicketTask
-      if (raw.timeMode === 'date' && raw.start && raw.end) {
-        const start = parseDate(raw.start)
-        const end = parseDate(raw.end)
-        rt.computed = { start, end, durationDays: daysBetween(start, end) }
-        earliestEnd.set(id, end)
-      } else if (raw.timeMode === 'duration' && raw.duration != null) {
-        const anchor = raw.start ? parseDate(raw.start) : null
-        const start = prereqEnd
-          ? (anchor && anchor > prereqEnd ? anchor : prereqEnd)
-          : (anchor ?? new Date())
-        const end = addDays(start, raw.duration)
-        rt.computed = { start, end, durationDays: raw.duration }
-        earliestEnd.set(id, end)
-      } else {
-        // Fallback: zero-duration at prereq end or epoch
-        const start = prereqEnd ?? new Date()
-        rt.computed = { start, end: start, durationDays: 0 }
-        earliestEnd.set(id, start)
+      if (start && end) {
+        rt.computed = { start, end, durationDays: Math.round((end.getTime() - start.getTime()) / MS_PER_DAY) }
       }
     }
   }
+  for (const root of project.roots) visit(root)
+}
+
+/**
+ * Compute start/end for every task + milestone and detect conflicts.
+ * Mutates `.computed` in place; returns any detected conflicts.
+ */
+export function schedule(project: Project): ScheduleConflict[] {
+  const conflicts: ScheduleConflict[] = []
+  const order = topoSort(project)
+
+  const runPass = () => {
+    const earliestEnd = new Map<NodeId, Date>()
+
+    const maxPrereqEnd = (id: NodeId): Date | null => {
+      let acc: Date | null = null
+      for (const pre of prereqsOf(project, id)) {
+        const e = earliestEnd.get(pre)
+        if (e && (!acc || e > acc)) acc = e
+      }
+      return acc
+    }
+
+    for (const id of order) {
+      const prereqEnd = maxPrereqEnd(id)
+      const t = project.tasks.get(id)
+
+      if (t) {
+        const raw = t.raw
+        // Container whose span was already resolved from children — keep fixed.
+        if (raw.type === 'container' && t.children.length > 0 && t.computed) {
+          earliestEnd.set(id, t.computed.end)
+          continue
+        }
+        if (raw.timeMode === 'date' && raw.start && raw.end) {
+          const start = parseDate(raw.start), end = parseDate(raw.end)
+          t.computed = { start, end, durationDays: Math.round((end.getTime() - start.getTime()) / MS_PER_DAY) }
+        } else {
+          const dur = raw.duration ?? 7
+          const anchor = raw.start ? parseDate(raw.start) : null
+          const start = prereqEnd ? (anchor && anchor > prereqEnd ? anchor : prereqEnd) : (anchor ?? new Date())
+          t.computed = { start, end: addDays(start, dur), durationDays: dur }
+        }
+        earliestEnd.set(id, t.computed.end)
+      } else {
+        const m = project.milestones.get(id)!
+        let time = prereqEnd ?? new Date()
+        if (m.raw.ownerId) {
+          const owner = project.tasks.get(m.raw.ownerId)
+          if (owner?.computed && owner.computed.end > time) time = owner.computed.end
+        }
+        m.computed = { start: time, end: time, durationDays: 0 }
+        earliestEnd.set(id, time)
+      }
+    }
+  }
+
+  runPass()
+  resolveContainers(project)
+  runPass()
 
   return conflicts
 }

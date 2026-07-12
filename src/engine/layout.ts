@@ -1,200 +1,274 @@
 import type {
-  Project, NodeId, RuntimeTask, SectionLayout, LayoutNode, LayoutConnector
+  Project, NodeId, TaskId, PanelId, RuntimeTask, RuntimeMilestone,
+  LayoutNode, LayoutConnector, PanelLayout, LayoutKind,
 } from '../types'
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+// ─── Constants (fixed element sizes — never scale with time zoom) ──────────────
 
-export const TASK_HEIGHT   = 40
-export const TASK_ROW_GAP  = 24
-export const ROW_STRIDE    = TASK_HEIGHT + TASK_ROW_GAP
+export const TASK_HEIGHT   = 34
+export const ROW_GAP       = 18
+export const ROW_STRIDE    = TASK_HEIGHT + ROW_GAP
 export const PX_PER_DAY    = 10
-export const MILESTONE_WIDTH = 2
-export const SECTION_H_PAD  = 64
+export const MIN_TASK_W    = 44
+export const POSTREQ_GAP   = 18   // enforced horizontal gap between a task and its successors
+export const SECTION_PAD   = 40   // left padding inside a panel
+export const PANEL_V_PAD   = 20   // vertical padding inside a panel
+export const PANEL_GAP     = 14   // gap between stacked panels
+export const MILESTONE_W   = 2
 
 const MS = 86_400_000
 
-// ─── Time-aware row occupancy ────────────────────────────────────────────────
-//
-// A row is "free" at a given time interval [s, e) (day offsets from section
-// start) if no task already assigned to that row overlaps that interval.
-// This lets tasks that don't overlap in time share the same row — the key to
-// avoiding unnecessary crossovers in chains like A→C (C starts where A ends).
+// ─── Time-aware row occupancy over pixel intervals ─────────────────────────────
 
-type Interval = [number, number]  // [startDay, endDay]
+type Interval = [number, number]
 
 function isFree(occ: Map<number, Interval[]>, row: number, s: number, e: number): boolean {
   return !(occ.get(row) ?? []).some(([rs, re]) => s < re && e > rs)
 }
-
 function claim(occ: Map<number, Interval[]>, row: number, s: number, e: number): void {
   if (!occ.has(row)) occ.set(row, [])
   occ.get(row)!.push([s, e])
 }
-
-// Search outward from `preferred` for the nearest free row at [s, e).
 function pickRow(occ: Map<number, Interval[]>, preferred: number, s: number, e: number): number {
-  for (let d = 0; d <= 200; d++) {
-    const candidates = d === 0 ? [preferred] : [preferred + d, preferred - d]
-    for (const r of candidates) {
+  for (let d = 0; d <= 400; d++) {
+    for (const r of (d === 0 ? [preferred] : [preferred + d, preferred - d])) {
       if (r >= 0 && isFree(occ, r, s, e)) return r
     }
   }
-  return preferred  // unreachable in practice
+  return preferred
 }
 
-// ─── Row assignment (topo sort + fan-in midpoint + time-aware) ───────────────
+// ─── Group layout ──────────────────────────────────────────────────────────────
+//
+// Lays out a set of sibling tasks + milestones sharing one timeline.
+// x is derived from time BUT enforced to leave POSTREQ_GAP after any
+// prerequisite — this both spaces out chained tasks and guarantees a task
+// never overlaps the milestone line that precedes it.
 
-function assignRows(
-  tasks: RuntimeTask[],
-  project: Project,
-  sectionStart: Date,
-): Map<NodeId, number> {
-  const siblingIds = new Set(tasks.map(t => t.raw.id))
-  const rowOf = new Map<NodeId, number>()
-  const occ   = new Map<number, Interval[]>()
+interface GroupInput {
+  tasks: RuntimeTask[]
+  milestones: RuntimeMilestone[]
+  sectionStart: Date
+  pxPerDay: number
+  panelId: PanelId
+  yBase: number
+  dimmedIds?: Set<NodeId>
+}
 
-  // Build local adjacency for topological processing
+interface GroupOutput {
+  nodes: LayoutNode[]
+  connectors: LayoutConnector[]
+  width: number
+  rowCount: number
+}
+
+function layoutGroup(input: GroupInput): GroupOutput {
+  const { tasks, milestones, sectionStart, pxPerDay, panelId, yBase, dimmedIds } = input
+
+  const groupIds = new Set<NodeId>([...tasks.map(t => t.raw.id), ...milestones.map(m => m.raw.id)])
+  const startMs = sectionStart.getTime()
+
+  const timeX = (d: Date | undefined): number =>
+    d ? SECTION_PAD + Math.max(0, (d.getTime() - startMs) / MS) * pxPerDay : SECTION_PAD
+
+  const widthOf = (id: NodeId, kind: LayoutKind): number => {
+    if (kind === 'milestone') return MILESTONE_W
+    const rt = tasks.find(t => t.raw.id === id)!
+    return Math.max((rt.computed?.durationDays ?? 1) * pxPerDay, MIN_TASK_W)
+  }
+
+  const kindOf = (id: NodeId): LayoutKind => {
+    const t = tasks.find(t => t.raw.id === id)
+    if (t) return t.raw.type === 'container' ? 'container' : 'ticket'
+    return 'milestone'
+  }
+  const computedOf = (id: NodeId) =>
+    tasks.find(t => t.raw.id === id)?.computed ?? milestones.find(m => m.raw.id === id)?.computed ?? null
+  const prereqsOf = (id: NodeId): NodeId[] =>
+    (tasks.find(t => t.raw.id === id)?.raw.prerequisites
+      ?? milestones.find(m => m.raw.id === id)?.raw.prerequisites
+      ?? []).filter(p => groupIds.has(p))
+
+  // Local topological order
   const inDeg = new Map<NodeId, number>()
-  const adj   = new Map<NodeId, NodeId[]>()
-  for (const t of tasks) { inDeg.set(t.raw.id, 0); adj.set(t.raw.id, []) }
-  for (const t of tasks) {
-    for (const pre of t.raw.prerequisites) {
-      if (!siblingIds.has(pre)) continue
-      adj.get(pre)!.push(t.raw.id)
-      inDeg.set(t.raw.id, inDeg.get(t.raw.id)! + 1)
-    }
+  const adj = new Map<NodeId, NodeId[]>()
+  for (const id of groupIds) { inDeg.set(id, 0); adj.set(id, []) }
+  for (const id of groupIds) {
+    for (const p of prereqsOf(id)) { adj.get(p)!.push(id); inDeg.set(id, inDeg.get(id)! + 1) }
   }
-
   const queue = [...inDeg.entries()].filter(([, d]) => d === 0).map(([id]) => id)
-
+  const order: NodeId[] = []
   while (queue.length) {
-    const id = queue.shift()!
-    const t  = project.tasks.get(id)!
-    const c  = t.computed
+    const cur = queue.shift()!
+    order.push(cur)
+    for (const n of adj.get(cur)!) { const d = inDeg.get(n)! - 1; inDeg.set(n, d); if (d === 0) queue.push(n) }
+  }
+  for (const id of groupIds) if (!order.includes(id)) order.push(id)
 
-    // Day-offset interval for this task
-    const s = c ? (c.start.getTime() - sectionStart.getTime()) / MS : 0
-    const e = c ? Math.max(s + 0.01, (c.end.getTime() - sectionStart.getTime()) / MS) : s + 1
-
-    const siblingPres = t.raw.prerequisites.filter(p => siblingIds.has(p))
-    const preferred = siblingPres.length === 0
-      ? 0
-      : Math.round(siblingPres.reduce((sum, p) => sum + (rowOf.get(p) ?? 0), 0) / siblingPres.length)
-
-    let row: number
-    if (t.raw.type === 'milestone') {
-      // Milestones are full-height dividers — don't occupy a row slot
-      row = preferred
-    } else {
-      row = pickRow(occ, preferred, s, e)
-      claim(occ, row, s, e)
+  // x with gap enforcement
+  const xLeft = new Map<NodeId, number>()
+  const xRight = new Map<NodeId, number>()
+  for (const id of order) {
+    const kind = kindOf(id)
+    const w = widthOf(id, kind)
+    let x = timeX(computedOf(id)?.start)
+    for (const p of prereqsOf(id)) {
+      const px = (xRight.get(p) ?? 0) + POSTREQ_GAP
+      if (px > x) x = px
     }
+    xLeft.set(id, x)
+    xRight.set(id, x + w)
+  }
 
+  // Row assignment (time-aware, fan-in midpoint) — milestones don't occupy rows
+  const occ = new Map<number, Interval[]>()
+  const rowOf = new Map<NodeId, number>()
+  for (const id of order) {
+    if (kindOf(id) === 'milestone') { rowOf.set(id, 0); continue }
+    const pres = prereqsOf(id).filter(p => kindOf(p) !== 'milestone')
+    const preferred = pres.length === 0
+      ? 0
+      : Math.round(pres.reduce((s, p) => s + (rowOf.get(p) ?? 0), 0) / pres.length)
+    const s = xLeft.get(id)!, e = xRight.get(id)!
+    const row = pickRow(occ, preferred, s, e)
+    claim(occ, row, s, e)
     rowOf.set(id, row)
+  }
 
-    for (const next of adj.get(id) ?? []) {
-      const d = inDeg.get(next)! - 1
-      inDeg.set(next, d)
-      if (d === 0) queue.push(next)
+  const taskRows = [...rowOf.entries()].filter(([id]) => kindOf(id) !== 'milestone').map(([, r]) => r)
+  const rowCount = taskRows.length ? Math.max(...taskRows) + 1 : 1
+
+  // Build nodes
+  const nodes: LayoutNode[] = []
+  for (const id of groupIds) {
+    const kind = kindOf(id)
+    const x = xLeft.get(id)!
+    if (kind === 'milestone') {
+      nodes.push({
+        id, kind, x, y: yBase, width: MILESTONE_W, height: rowCount * ROW_STRIDE,
+        row: 0, panelId, dimmed: dimmedIds?.has(id),
+      })
+    } else {
+      nodes.push({
+        id, kind, x, y: yBase + (rowOf.get(id) ?? 0) * ROW_STRIDE,
+        width: xRight.get(id)! - x, height: TASK_HEIGHT,
+        row: rowOf.get(id) ?? 0, panelId, dimmed: dimmedIds?.has(id),
+      })
     }
   }
 
-  return rowOf
+  // Connectors (within group only)
+  const connectors: LayoutConnector[] = []
+  for (const id of groupIds) {
+    for (const p of prereqsOf(id)) connectors.push({ fromId: p, toId: id, points: [] })
+  }
+
+  const width = Math.max(SECTION_PAD, ...[...xRight.values()]) + SECTION_PAD
+  return { nodes, connectors, width, rowCount }
 }
 
-// ─── Section layout ───────────────────────────────────────────────────────────
+// ─── Top-level (panels) layout ─────────────────────────────────────────────────
 
-export function layoutSiblingGroup(
-  tasks: RuntimeTask[],
-  project: Project,
-  parentTaskId: NodeId | null,
-  xOffsetStart: number,
-  pxPerDay: number,
-): SectionLayout[] {
-  if (tasks.length === 0) return []
+export interface LayoutResult {
+  panels: PanelLayout[]
+  width: number
+  height: number
+  sectionStart: Date | null
+}
 
-  const milestones = tasks.filter(t => t.raw.type === 'milestone')
-
-  // Earliest start across all tasks → section x-origin
-  let sectionStart: Date | null = null
-  for (const t of tasks) {
-    if (t.computed && (!sectionStart || t.computed.start < sectionStart))
-      sectionStart = t.computed.start
-  }
-  if (!sectionStart) sectionStart = new Date()
-
-  const rowOf = assignRows(tasks, project, sectionStart)
-
-  const taskRows = [...rowOf.values()].filter((_, i) => tasks[i]?.raw.type !== 'milestone')
-  const totalRows = taskRows.length === 0 ? 1 : Math.max(...taskRows) + 1
-
-  const siblingIds = new Set(tasks.map(t => t.raw.id))
-  const sectionId  = String(parentTaskId ?? 'root')
-
-  // ── LayoutNodes ────────────────────────────────────────────────────────────
-  const nodes: LayoutNode[] = []
-
-  for (const t of tasks) {
-    const c   = t.computed
-    const id  = t.raw.id
-    const row = rowOf.get(id) ?? 0
-    if (!c) continue
-
-    const dayOffset = (c.start.getTime() - sectionStart.getTime()) / MS
-    const x = SECTION_H_PAD + Math.max(0, dayOffset) * pxPerDay
-
-    if (t.raw.type === 'milestone') {
-      nodes.push({
-        id, x, y: 0,
-        width: MILESTONE_WIDTH,
-        height: totalRows * ROW_STRIDE,
-        row: 0, sectionId,
-      })
-    } else {
-      const w = Math.max(c.durationDays * pxPerDay, 48)
-      nodes.push({
-        id, x, y: row * ROW_STRIDE,
-        width: w, height: TASK_HEIGHT,
-        row, sectionId,
-      })
-    }
-  }
-
-  // ── Connectors ─────────────────────────────────────────────────────────────
-  const connectors: LayoutConnector[] = []
-  const nodeMap = new Map(nodes.map(n => [n.id, n]))
-
-  for (const t of tasks) {
-    for (const preId of t.raw.prerequisites) {
-      if (!siblingIds.has(preId)) continue
-      if (!nodeMap.has(preId) || !nodeMap.has(t.raw.id)) continue
-      connectors.push({ fromId: preId, toId: t.raw.id, points: [] })
-    }
-  }
-
-  const maxX   = nodes.reduce((m, n) => Math.max(m, n.x + n.width), 0) + SECTION_H_PAD
-  const height = totalRows * ROW_STRIDE
-
-  return [{
-    id: sectionId,
-    parentTaskId,
-    startMilestoneId: null,
-    endMilestoneId: milestones.length > 0 ? milestones[milestones.length - 1].raw.id : null,
-    nodes, connectors,
-    xOffset: xOffsetStart,
-    width: maxX,
-    height,
-  }]
+function earliestStart(items: Array<{ computed: { start: Date } | null }>): Date | null {
+  let s: Date | null = null
+  for (const it of items) if (it.computed && (!s || it.computed.start < s)) s = it.computed.start
+  return s
 }
 
 export function buildLayout(
   project: Project,
-  parentTaskId: NodeId | null,
+  drillId: TaskId | null,
   pxPerDay: number = PX_PER_DAY,
-): SectionLayout[] {
-  const siblings: RuntimeTask[] = parentTaskId === null
-    ? project.roots
-    : (project.tasks.get(parentTaskId)?.children ?? [])
+): LayoutResult {
+  return drillId === null
+    ? buildTopLevel(project, pxPerDay)
+    : buildDrilled(project, drillId, pxPerDay)
+}
 
-  return layoutSiblingGroup(siblings, project, parentTaskId, 0, pxPerDay)
+function buildTopLevel(project: Project, pxPerDay: number): LayoutResult {
+  const allTop = project.roots
+  const sectionStart = earliestStart(allTop) ?? new Date()
+
+  const panels: PanelLayout[] = []
+  let yCursor = 0
+  let maxWidth = 0
+
+  for (const panel of project.panels) {
+    const tasks = allTop.filter(t => t.raw.panel === panel.id)
+    const ms = [...project.milestones.values()].filter(m => m.raw.parent === null && m.raw.panel === panel.id)
+
+    const g = layoutGroup({
+      tasks, milestones: ms, sectionStart, pxPerDay, panelId: panel.id, yBase: PANEL_V_PAD,
+    })
+    const height = g.rowCount * ROW_STRIDE + PANEL_V_PAD * 2
+
+    panels.push({
+      panelId: panel.id, name: panel.name, color: panel.color,
+      nodes: g.nodes, connectors: g.connectors,
+      yOffset: yCursor, height, width: g.width,
+    })
+    yCursor += height + PANEL_GAP
+    maxWidth = Math.max(maxWidth, g.width)
+  }
+
+  return { panels, width: maxWidth, height: Math.max(0, yCursor - PANEL_GAP), sectionStart }
+}
+
+function buildDrilled(project: Project, drillId: TaskId, pxPerDay: number): LayoutResult {
+  const container = project.tasks.get(drillId)
+  if (!container || container.raw.type !== 'container') return buildTopLevel(project, pxPerDay)
+
+  const panelId = topPanelOf(project, container)
+  const children = container.children
+  const start = container.computed?.start ?? earliestStart(children) ?? new Date()
+  const end   = container.computed?.end ?? start
+
+  // Synthetic start boundary (= the container's prereq boundary)
+  const startMs: RuntimeMilestone = {
+    raw: { id: `__start_${drillId}`, name: `${container.raw.name} · start`, parent: drillId, panel: null, ownerId: null, prerequisites: [], order: 'a0' },
+    computed: { start, end: start, durationDays: 0 },
+  }
+
+  const childMilestones = [...project.milestones.values()].filter(m => m.raw.parent === drillId)
+  const hasRealCompletion = childMilestones.some(m => m.raw.ownerId === drillId)
+
+  // Synthesise the end/completion boundary only if the user hasn't created a real one.
+  const boundary: RuntimeMilestone[] = [startMs]
+  if (!hasRealCompletion) {
+    boundary.push({
+      raw: { id: `__end_${drillId}`, name: container.raw.name, parent: drillId, panel: null, ownerId: drillId, prerequisites: [], order: 'z9' },
+      computed: { start: end, end, durationDays: 0 },
+    })
+  }
+
+  const g = layoutGroup({
+    tasks: children,
+    milestones: [...boundary, ...childMilestones],
+    sectionStart: start, pxPerDay, panelId, yBase: PANEL_V_PAD,
+  })
+  const height = g.rowCount * ROW_STRIDE + PANEL_V_PAD * 2
+
+  const panel = project.panels.find(p => p.id === panelId)
+  return {
+    panels: [{
+      panelId, name: container.raw.name, color: panel?.color ?? '#2563eb',
+      nodes: g.nodes, connectors: g.connectors, yOffset: 0, height, width: g.width,
+    }],
+    width: g.width,
+    height,
+    sectionStart: start,
+  }
+}
+
+function topPanelOf(project: Project, rt: RuntimeTask): PanelId {
+  let cur: RuntimeTask | undefined = rt
+  while (cur && cur.raw.parent !== null) cur = project.tasks.get(cur.raw.parent)
+  return cur?.raw.panel ?? project.panels[0]?.id ?? 'pn_default'
 }

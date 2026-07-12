@@ -6,6 +6,7 @@ import { schedule } from './engine/scheduler'
 import { GanttView } from './views/GanttView'
 import { KanbanView } from './views/KanbanView'
 import { FormatBar } from './views/FormatBar'
+import { openTagManager } from './views/TagManager'
 import { openFile, saveFile, tryReopenLast, requestPermission } from './persistence/fsa'
 import { loadHandle } from './persistence/idb'
 
@@ -26,16 +27,11 @@ function buildShell() {
         <button class="btn active" id="btn-gantt">Gantt</button>
         <button class="btn" id="btn-kanban">Kanban</button>
       </div>
-      <button class="btn" id="btn-add-task" style="display:none">+ Add Task</button>
+      <button class="btn" id="btn-tags" style="display:none">Tags</button>
       <div style="flex:1"></div>
       <button class="btn" id="btn-new">New</button>
       <button class="btn" id="btn-open">Open</button>
       <button class="btn" id="btn-save">Save</button>
-      <div id="zoom-wrap" style="display:flex;gap:4px">
-        <button class="btn btn-icon" id="btn-zoom-out">−</button>
-        <button class="btn btn-icon" id="btn-zoom-reset" title="Reset zoom">⊙</button>
-        <button class="btn btn-icon" id="btn-zoom-in">+</button>
-      </div>
     </div>
     <div id="format-bar-wrap"></div>
     <div id="placement-banner" style="display:none"></div>
@@ -77,15 +73,16 @@ function showView(view: 'gantt' | 'kanban') {
 
   document.getElementById('btn-gantt')!.classList.toggle('active', view === 'gantt')
   document.getElementById('btn-kanban')!.classList.toggle('active', view === 'kanban')
-  document.getElementById('zoom-wrap')!.style.display = view === 'gantt' ? 'flex' : 'none'
-  document.getElementById('btn-add-task')!.style.display = view === 'gantt' ? 'inline-flex' : 'none'
+  document.getElementById('btn-tags')!.style.display = 'inline-flex'
 
+  ganttView?.dispose()
   canvasWrap.innerHTML = ''
 
   if (view === 'gantt') {
     ganttView = new GanttView(canvasWrap, project, formatBar)
   } else {
     ganttView = null
+    formatBar.selectTask(null)
     new KanbanView(canvasWrap, project)
   }
 }
@@ -184,13 +181,9 @@ async function init() {
   document.getElementById('btn-gantt')!.addEventListener('click', () => showView('gantt'))
   document.getElementById('btn-kanban')!.addEventListener('click', () => showView('kanban'))
 
-  document.getElementById('btn-add-task')!.addEventListener('click', () => {
-    ganttView?.openAddTaskModal()
+  document.getElementById('btn-tags')!.addEventListener('click', () => {
+    if (project) openTagManager(project, () => { if (currentView === 'gantt') showView('gantt'); else showView('kanban') })
   })
-
-  document.getElementById('btn-zoom-in')!.addEventListener('click', ()    => ganttView?.zoomIn())
-  document.getElementById('btn-zoom-out')!.addEventListener('click', ()   => ganttView?.zoomOut())
-  document.getElementById('btn-zoom-reset')!.addEventListener('click', () => ganttView?.zoomReset())
 }
 
 init().catch(console.error)

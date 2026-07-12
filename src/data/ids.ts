@@ -8,7 +8,9 @@ function rand(len: number): string {
   return s
 }
 
-export const newTaskId     = () => `t_${rand(8)}` as string
-export const newMilestone  = () => `m_${rand(8)}` as string
-export const newPersonId   = () => `p_${rand(8)}` as string
-export const newColumnId   = () => `c_${rand(8)}` as string
+export const newTaskId      = () => `t_${rand(8)}` as string
+export const newMilestoneId = () => `m_${rand(8)}` as string
+export const newPanelId     = () => `pn_${rand(8)}` as string
+export const newPersonId    = () => `p_${rand(8)}` as string
+export const newTagId       = () => `g_${rand(8)}` as string
+export const newColumnId    = () => `c_${rand(8)}` as string
