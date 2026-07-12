@@ -113,10 +113,10 @@ export class GanttView {
   private drillStack: Array<{ id: TaskId | null; label: string }> = []
   private drillId: TaskId | null = null
   private selectedId: NodeId | null = null
-  private pxPerDay = PX_PER_DAY
+  private pxPerDay = PX_PER_DAY   // time density (horizontal-only zoom)
+  private zoom = 1                // uniform zoom (all directions)
   private panX = 20
   private panY = 20
-  private chromeScale = 1
   private isPanning = false
   private last = { x: 0, y: 0 }
   private pendingEditId: TaskId | null = null
@@ -160,7 +160,7 @@ export class GanttView {
 
   dispose() { this.ro.disconnect(); document.removeEventListener('keydown', this.onKeyDown) }
 
-  private get dateBarH() { return DATE_BAR_BASE * this.chromeScale }
+  private get dateBarH() { return DATE_BAR_BASE }   // constant; visually scaled by `zoom`
   private get W() { return this.container.clientWidth }
   private get H() { return this.container.clientHeight }
 
@@ -273,24 +273,25 @@ export class GanttView {
     const xOf = (d: Date) => SECTION_PAD + ((d.getTime() - startMs) / MS) * this.pxPerDay
     const gr = granularity(this.pxPerDay)
 
-    // Axis group is translated by panX only. To cover the viewport [0, W] in
-    // screen space we draw from local x = -panX-200 across W+400.
-    const localX0 = -this.panX - 200
-    const spanW = this.W + 400
+    // Axis group is translate(panX,0) scale(zoom). Screen x = panX + localX*zoom,
+    // so local coords covering the viewport [0, W] run from -panX/zoom to (W-panX)/zoom.
+    const z = this.zoom
+    const localLeft = -this.panX / z
+    const localRight = (this.W - this.panX) / z
     const bg = el('rect')
-    bg.setAttribute('x', String(localX0)); bg.setAttribute('y', '0')
-    bg.setAttribute('width', String(spanW)); bg.setAttribute('height', String(H))
+    bg.setAttribute('x', String(localLeft - 200)); bg.setAttribute('y', '0')
+    bg.setAttribute('width', String(localRight - localLeft + 400)); bg.setAttribute('height', String(H))
     bg.setAttribute('fill', '#f8fafc')
     g.appendChild(bg)
     for (const yy of [coarseH, H]) {
       const ln = el('line')
-      ln.setAttribute('x1', String(localX0)); ln.setAttribute('y1', String(yy))
-      ln.setAttribute('x2', String(localX0 + spanW)); ln.setAttribute('y2', String(yy))
+      ln.setAttribute('x1', String(localLeft - 200)); ln.setAttribute('y1', String(yy))
+      ln.setAttribute('x2', String(localRight + 200)); ln.setAttribute('y2', String(yy))
       ln.setAttribute('stroke', '#e2e8f0'); g.appendChild(ln)
     }
 
-    const visDaysLeft = (-this.panX - SECTION_PAD) / this.pxPerDay - 40
-    const visDaysRight = (this.W - this.panX - SECTION_PAD) / this.pxPerDay + 40
+    const visDaysLeft = (localLeft - SECTION_PAD) / this.pxPerDay - 40
+    const visDaysRight = (localRight - SECTION_PAD) / this.pxPerDay + 40
     const leftDate = new Date(startMs + visDaysLeft * MS)
     const rightDate = new Date(startMs + visDaysRight * MS)
 
@@ -304,7 +305,7 @@ export class GanttView {
       sep.setAttribute('stroke', '#cbd5e1'); g.appendChild(sep)
       const lbl = el('text')
       lbl.setAttribute('x', String(x + 6)); lbl.setAttribute('y', String(coarseH / 2 + 4))
-      lbl.setAttribute('fill', '#475569'); lbl.setAttribute('font-size', String(11 * this.chromeScale))
+      lbl.setAttribute('fill', '#475569'); lbl.setAttribute('font-size', '11')
       lbl.setAttribute('font-weight', '600'); lbl.textContent = coarseLabel(d, gr.coarse)
       g.appendChild(lbl)
       d = next
@@ -321,7 +322,7 @@ export class GanttView {
       if (bandW > 16) {
         const lbl = el('text')
         lbl.setAttribute('x', String(x + 4)); lbl.setAttribute('y', String(coarseH + (H - coarseH) / 2 + 4))
-        lbl.setAttribute('fill', '#64748b'); lbl.setAttribute('font-size', String(10 * this.chromeScale))
+        lbl.setAttribute('fill', '#64748b'); lbl.setAttribute('font-size', '10')
         lbl.textContent = fineLabel(d, gr.fine)
         g.appendChild(lbl)
       }
@@ -330,17 +331,18 @@ export class GanttView {
   }
 
   private renderPanelBars(layout: LayoutResult) {
+    const z = this.zoom
     const inner = document.createElement('div')
     inner.className = 'panel-bars-inner'
     inner.style.transform = `translateY(${this.panY}px)`
-    this.panelBars.style.top = `${this.dateBarH}px`
+    this.panelBars.style.top = `${this.dateBarH * z}px`
 
     const reorderable = this.drillId === null && layout.panels.length > 1
     layout.panels.forEach((panel) => {
       const bar = document.createElement('div')
       bar.className = 'panel-bar'
-      bar.style.top = `${panel.yOffset}px`
-      bar.style.height = `${panel.height}px`
+      bar.style.top = `${panel.yOffset * z}px`
+      bar.style.height = `${panel.height * z}px`
       bar.style.background = panel.color
       bar.dataset.panelId = panel.panelId
       bar.innerHTML = `<span class="panel-bar-name">${panel.name}</span>`
@@ -375,7 +377,7 @@ export class GanttView {
       add.className = 'panel-add-btn'
       add.textContent = '+'
       add.title = 'Add panel below'
-      add.style.top = `${layout.height + 8}px`
+      add.style.top = `${layout.height * this.zoom + 8}px`
       add.addEventListener('click', () => this.addPanel())
       inner.appendChild(add)
     }
@@ -386,8 +388,9 @@ export class GanttView {
   // ─── Transform / pan / zoom ───────────────────────────────────────────────────
 
   private applyTransform() {
-    this.axisG.setAttribute('transform', `translate(${this.panX}, 0)`)
-    this.contentG.setAttribute('transform', `translate(${this.panX}, ${this.dateBarH + this.panY})`)
+    const z = this.zoom
+    this.axisG.setAttribute('transform', `translate(${this.panX}, 0) scale(${z})`)
+    this.contentG.setAttribute('transform', `translate(${this.panX}, ${this.dateBarH * z + this.panY}) scale(${z})`)
     const inner = this.panelBars.querySelector<HTMLElement>('.panel-bars-inner')
     if (inner) inner.style.transform = `translateY(${this.panY}px)`
   }
@@ -420,19 +423,17 @@ export class GanttView {
 
     c.addEventListener('wheel', (e) => {
       e.preventDefault()
-      if (e.shiftKey) {
-        // Smooth time zoom around cursor (gentle)
-        const rect = this.svg.getBoundingClientRect()
-        const cursorX = e.clientX - rect.left
-        const cxOld = cursorX - this.panX
-        const factor = Math.exp(-e.deltaY * 0.0016)
-        const next = Math.max(1.2, Math.min(60, this.pxPerDay * factor))
-        const ratio = next / this.pxPerDay
-        const cxNew = SECTION_PAD + (cxOld - SECTION_PAD) * ratio
-        this.panX = cursorX - cxNew
-        this.pxPerDay = next
-        this.render()
+      const rect = this.svg.getBoundingClientRect()
+      const cursorX = e.clientX - rect.left
+      const cursorY = e.clientY - rect.top
+      if (e.ctrlKey || e.metaKey) {
+        // Uniform zoom (all directions) around the cursor — pinch / Ctrl+wheel.
+        this.applyUniformZoom(Math.exp(-e.deltaY * 0.0022), cursorX, cursorY)
+      } else if (e.shiftKey) {
+        // Time-only zoom (horizontal density) around the cursor.
+        this.applyTimeZoom(Math.exp(-e.deltaY * 0.0018), cursorX)
       } else {
+        // Pan both axes (trackpad gives x+y; mouse-wheel gives y).
         this.panX -= e.deltaX
         this.panY -= e.deltaY
         this.lightPan()
@@ -442,18 +443,48 @@ export class GanttView {
     document.addEventListener('keydown', this.onKeyDown)
   }
 
+  /** Uniform zoom keeping the point under (sx,sy) fixed on screen. */
+  private applyUniformZoom(factor: number, sx: number, sy: number) {
+    const z0 = this.zoom
+    const z1 = Math.max(0.2, Math.min(4, z0 * factor))
+    if (z1 === z0) return
+    // screen = pan + local*z + (x: 0 | y: dateBarH*z)
+    const lx = (sx - this.panX) / z0
+    const ly = (sy - this.dateBarH * z0 - this.panY) / z0
+    this.zoom = z1
+    this.panX = sx - lx * z1
+    this.panY = sy - this.dateBarH * z1 - ly * z1
+    this.render()
+  }
+
+  /** Time-density zoom keeping the date under cursor fixed. */
+  private applyTimeZoom(factor: number, sx: number) {
+    const z = this.zoom
+    const localX = (sx - this.panX) / z
+    const day = (localX - SECTION_PAD) / this.pxPerDay
+    const next = Math.max(1.2, Math.min(80, this.pxPerDay * factor))
+    if (next === this.pxPerDay) return
+    this.pxPerDay = next
+    const localXNew = SECTION_PAD + day * next
+    this.panX = sx - localXNew * z
+    this.render()
+  }
+
   private onKeyDown = (e: KeyboardEvent) => {
     if (e.key === 'Escape') {
       if (this.pickPrereqFor) { this.pickPrereqFor = null; this.render() }
       else if (this.selectedId) this.select(null)
     }
-    // Cmd/Ctrl +/- → chrome density (date bar + menu bar)
+    // Cmd/Ctrl +/- → uniform zoom in/out (centred on the viewport).
     if ((e.metaKey || e.ctrlKey) && (e.key === '=' || e.key === '+' || e.key === '-' || e.key === '_')) {
       e.preventDefault()
-      const dir = (e.key === '-' || e.key === '_') ? -1 : 1
-      this.chromeScale = Math.max(0.7, Math.min(1.6, this.chromeScale + dir * 0.1))
-      document.documentElement.style.setProperty('--chrome-scale', String(this.chromeScale))
-      this.render()
+      const factor = (e.key === '-' || e.key === '_') ? 1 / 1.15 : 1.15
+      this.applyUniformZoom(factor, this.W / 2, this.H / 2)
+    }
+    // Cmd/Ctrl + 0 → reset zoom.
+    if ((e.metaKey || e.ctrlKey) && e.key === '0') {
+      e.preventDefault()
+      this.zoom = 1; this.pxPerDay = PX_PER_DAY; this.panX = 20; this.panY = 20; this.render()
     }
   }
 
