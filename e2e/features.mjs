@@ -73,6 +73,43 @@ await withApp(async (app) => {
   const after = await app.eval(() => [...document.querySelectorAll('.panel-bar-name')].map(n => n.textContent))
   ok(JSON.stringify(before) !== JSON.stringify(after), `reorder changes order (${before[0]}→${after[0]})`)
 
+  // ── v3: drill model, breadcrumb, panels, milestones, date-mode add ──────────
+  section('drill expand-in-place: siblings stay visible, breadcrumb is the real path')
+  await app.loadExample()
+  await app.dblclickTask('t_build')
+  await app.eval(() => document.querySelector('.edit-popup')?.remove())
+  ok((await app.counts()).breadcrumb === 'Helio App Launch/Build', 'breadcrumb = root/Build')
+  ok(await app.eval(() => !!document.querySelector('.task-block[data-id="t_launch"]')), 'sibling Launch still shown while Build expanded')
+  ok(await app.eval(() => !!document.querySelector('.task-block[data-id="t_api"]')), 'Build children shown inline')
+  ok(await app.eval(() => !document.querySelector('[data-id^="__start_"] .task-block') && !!document.querySelector('.milestone-flag[data-id^="__start_"]')), 'Build start boundary milestone present')
+  await app.dblclickTask('t_plan')
+  ok((await app.counts()).breadcrumb === 'Helio App Launch/Planning', 'breadcrumb replaces (not root/Build/Planning)')
+
+  section('root Start milestone + names on left')
+  await app.loadExample()
+  ok(await app.eval(() => !!document.querySelector('.milestone-flag[data-id^="__rootstart_"]')), 'default root Start milestone exists')
+  ok(await app.eval(() => { const b = document.querySelector('.panel-bars'); const c = document.querySelector('#canvas-wrap'); return b && c && b.getBoundingClientRect().left < c.getBoundingClientRect().width / 2 }), 'panel bars on the left')
+
+  section('panel bar: single-click popup, double-click maximize')
+  await app.eval(() => { const bar = document.querySelector('.panel-bar'); const r = bar.getBoundingClientRect(); bar.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) })
+  await app.wait(150)
+  ok((await app.counts()).panels === 1, 'double-click maximizes to a single panel')
+  await app.eval(() => document.querySelector('.panel-bar').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))); await app.wait(150)
+  ok((await app.counts()).panels === 2, 'double-click again restores panels')
+  await app.click('.panel-bar'); await app.wait(300)
+  ok(await app.eval(() => !!document.querySelector('.panel-popup')), 'single-click opens panel name/colour popup')
+  await app.page.keyboard.press('Escape'); await app.eval(() => document.querySelector('.panel-popup')?.remove())
+
+  section('add task: date-fixed option in the new-task modal')
+  await app.clickAddBtn('t_launch', 0)
+  ok(await app.eval(() => !!document.querySelector('#atm-mode')), 'new-task modal has Duration/Date-fixed switch')
+  await app.eval(() => document.querySelector('#atm-mode .seg-btn[data-mode="date"]').click())
+  ok(await app.eval(() => getComputedStyle(document.querySelector('#atm-date-row')).display !== 'none'), 'date-fixed reveals start/end')
+  await app.fill('#atm-name', 'DateTask'); await app.fill('#atm-start', '2026-03-01'); await app.fill('#atm-end', '2026-03-05')
+  await app.page.click('#atm-add'); await app.wait(300)
+  await app.eval(() => document.querySelector('.edit-popup')?.remove())
+  ok(await app.eval(() => { const t = [...window.__planar.tasks.values()].find(x => x.raw.name === 'DateTask'); return t && t.raw.timeMode === 'date' && t.raw.start === '2026-03-01' }), 'date-fixed task created with fixed dates')
+
   // ── Kanban ───────────────────────────────────────────────────────────────
   section('kanban: add column, config, card edit, avatars, tags')
   await app.gotoKanban()

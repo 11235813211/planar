@@ -5,13 +5,14 @@ import type {
 
 // ─── Constants (fixed element sizes — never scale with time zoom) ──────────────
 
-export const TASK_HEIGHT   = 34
-export const LABEL_ABOVE_H = 17   // room for the task name rendered above the bar
-export const ROW_GAP       = 14
-export const ROW_STRIDE    = LABEL_ABOVE_H + TASK_HEIGHT + ROW_GAP
+export const TASK_HEIGHT   = 30
+export const LABEL_ABOVE_H = 15   // room for the task name rendered above the bar
+export const ROW_GAP       = 7
+export const ROW_STRIDE    = LABEL_ABOVE_H + TASK_HEIGHT + ROW_GAP   // gentler staircase drop
 export const PX_PER_DAY    = 10
 export const MIN_TASK_W    = 16   // tiny leaf tickets stay clickable (kept small to avoid overrun)
-export const SECTION_PAD   = 40   // left padding inside a panel
+export const MS_INSET      = 10   // gap between a milestone line and a task that starts on it
+export const SECTION_PAD   = 48   // left padding inside a panel
 export const PANEL_V_PAD   = 20   // vertical padding inside a panel
 export const PANEL_GAP     = 14   // gap between stacked panels
 export const MILESTONE_W   = 2
@@ -49,7 +50,7 @@ interface GroupInput {
   pxPerDay: number
   panelId: PanelId
   yBase: number
-  dimmedIds?: Set<NodeId>
+  prereqOverride?: Map<NodeId, NodeId[]>   // used by expand-in-place drilling
 }
 
 interface GroupOutput {
@@ -60,25 +61,19 @@ interface GroupOutput {
 }
 
 function layoutGroup(input: GroupInput): GroupOutput {
-  const { tasks, milestones, sectionStart, pxPerDay, panelId, yBase, dimmedIds } = input
+  const { tasks, milestones, sectionStart, pxPerDay, panelId, yBase, prereqOverride } = input
 
   const groupIds = new Set<NodeId>([...tasks.map(t => t.raw.id), ...milestones.map(m => m.raw.id)])
   const startMs = sectionStart.getTime()
-
-  // No clamp: dimmed context tasks before the section start get a negative offset
-  // (visible by scrolling left).
   const timeX = (d: Date | undefined): number =>
     d ? SECTION_PAD + ((d.getTime() - startMs) / MS) * pxPerDay : SECTION_PAD
 
   const widthOf = (id: NodeId, kind: LayoutKind): number => {
     if (kind === 'milestone') return MILESTONE_W
     const rt = tasks.find(t => t.raw.id === id)!
-    // Milestone-tasks (containers) size to their real span; only tiny leaf tickets
-    // get a minimum width so they stay clickable.
     const px = (rt.computed?.durationDays ?? 1) * pxPerDay
     return rt.raw.type === 'container' ? Math.max(px, 8) : Math.max(px, MIN_TASK_W)
   }
-
   const kindOf = (id: NodeId): LayoutKind => {
     const t = tasks.find(t => t.raw.id === id)
     if (t) return t.raw.type === 'container' ? 'container' : 'ticket'
@@ -86,10 +81,11 @@ function layoutGroup(input: GroupInput): GroupOutput {
   }
   const computedOf = (id: NodeId) =>
     tasks.find(t => t.raw.id === id)?.computed ?? milestones.find(m => m.raw.id === id)?.computed ?? null
+  const rawPrereqs = (id: NodeId): NodeId[] =>
+    tasks.find(t => t.raw.id === id)?.raw.prerequisites
+      ?? milestones.find(m => m.raw.id === id)?.raw.prerequisites ?? []
   const prereqsOf = (id: NodeId): NodeId[] =>
-    (tasks.find(t => t.raw.id === id)?.raw.prerequisites
-      ?? milestones.find(m => m.raw.id === id)?.raw.prerequisites
-      ?? []).filter(p => groupIds.has(p))
+    (prereqOverride?.get(id) ?? rawPrereqs(id)).filter(p => groupIds.has(p))
 
   // Local topological order
   const inDeg = new Map<NodeId, number>()
@@ -107,29 +103,27 @@ function layoutGroup(input: GroupInput): GroupOutput {
   }
   for (const id of groupIds) if (!order.includes(id)) order.push(id)
 
-  // Pure time-based x: bars align exactly with the date axis, and milestones sit on
-  // day boundaries. Visual separation of chained tasks comes from the staircase rows
-  // (below), not from horizontal gaps — so nothing runs over a milestone line.
+  // Milestone x positions (day-aligned pure time). Tasks that start on a milestone
+  // are inset so there's a visible gap + connector between the line and the bar.
+  const milestoneXs: number[] = milestones.map(m => timeX(m.computed?.start)).sort((a, b) => a - b)
+
   const xLeft = new Map<NodeId, number>()
   const xRight = new Map<NodeId, number>()
   for (const id of order) {
     const kind = kindOf(id)
-    const x = timeX(computedOf(id)?.start)
+    let x = timeX(computedOf(id)?.start)
+    if (kind !== 'milestone' && milestoneXs.some(mx => Math.abs(mx - x) < 1)) x += MS_INSET
     xLeft.set(id, x)
     xRight.set(id, x + widthOf(id, kind))
   }
 
-  // Staircase row assignment: a task sits one row BELOW its lowest (non-milestone)
-  // prerequisite, so prereq chains step down-and-right and every bar has empty space
-  // above it for its name. Milestones don't occupy rows.
+  // Staircase rows (down + right), milestones don't occupy rows.
   const occ = new Map<number, Interval[]>()
   const rowOf = new Map<NodeId, number>()
   for (const id of order) {
     if (kindOf(id) === 'milestone') { rowOf.set(id, 0); continue }
     const pres = prereqsOf(id).filter(p => kindOf(p) !== 'milestone')
-    const preferred = pres.length === 0
-      ? 0
-      : Math.max(...pres.map(p => rowOf.get(p) ?? 0)) + 1
+    const preferred = pres.length === 0 ? 0 : Math.max(...pres.map(p => rowOf.get(p) ?? 0)) + 1
     const s = xLeft.get(id)!, e = xRight.get(id)!
     const row = pickRowDown(occ, preferred, s, e)
     claim(occ, row, s, e)
@@ -139,30 +133,26 @@ function layoutGroup(input: GroupInput): GroupOutput {
   const taskRows = [...rowOf.entries()].filter(([id]) => kindOf(id) !== 'milestone').map(([, r]) => r)
   const rowCount = taskRows.length ? Math.max(...taskRows) + 1 : 1
 
-  // Build nodes
   const nodes: LayoutNode[] = []
   for (const id of groupIds) {
     const kind = kindOf(id)
     const x = xLeft.get(id)!
     if (kind === 'milestone') {
-      nodes.push({
-        id, kind, x, y: yBase, width: MILESTONE_W, height: rowCount * ROW_STRIDE,
-        row: 0, panelId, dimmed: dimmedIds?.has(id),
-      })
+      nodes.push({ id, kind, x, y: yBase, width: MILESTONE_W, height: rowCount * ROW_STRIDE, row: 0, panelId })
     } else {
+      // Title must stop before the next milestone to its right.
+      const nextMs = milestoneXs.filter(mx => mx > x + 6).sort((a, b) => a - b)[0]
       nodes.push({
         id, kind, x, y: yBase + (rowOf.get(id) ?? 0) * ROW_STRIDE,
         width: xRight.get(id)! - x, height: TASK_HEIGHT,
-        row: rowOf.get(id) ?? 0, panelId, dimmed: dimmedIds?.has(id),
+        row: rowOf.get(id) ?? 0, panelId,
+        titleClipX: nextMs != null ? nextMs - 4 : undefined,
       })
     }
   }
 
-  // Connectors (within group only)
   const connectors: LayoutConnector[] = []
-  for (const id of groupIds) {
-    for (const p of prereqsOf(id)) connectors.push({ fromId: p, toId: id, points: [] })
-  }
+  for (const id of groupIds) for (const p of prereqsOf(id)) connectors.push({ fromId: p, toId: id, points: [] })
 
   const width = Math.max(SECTION_PAD, ...[...xRight.values()]) + SECTION_PAD
   return { nodes, connectors, width, rowCount }
@@ -185,115 +175,116 @@ function earliestStart(items: Array<{ computed: { start: Date } | null }>): Date
 
 export function buildLayout(
   project: Project,
-  drillId: TaskId | null,
+  expandId: TaskId | null,
   pxPerDay: number = PX_PER_DAY,
+  maximizedPanel: PanelId | null = null,
 ): LayoutResult {
-  return drillId === null
-    ? buildTopLevel(project, pxPerDay)
-    : buildDrilled(project, drillId, pxPerDay)
-}
+  // Global section start so all panels share one date axis.
+  const allStarts: Array<{ computed: { start: Date } | null }> = [
+    ...project.roots,
+    ...[...project.milestones.values()],
+  ]
+  const sectionStart = earliestStart(allStarts) ?? new Date()
 
-function buildTopLevel(project: Project, pxPerDay: number): LayoutResult {
-  const allTop = project.roots
-  const sectionStart = earliestStart(allTop) ?? new Date()
+  const expand = expandId ? project.tasks.get(expandId) ?? null : null
+  const expandPanel = expand ? topPanelOf(project, expand) : null
 
   const panels: PanelLayout[] = []
   let yCursor = 0
   let maxWidth = 0
 
-  for (const panel of project.panels) {
-    const tasks = allTop.filter(t => t.raw.panel === panel.id)
-    const ms = [...project.milestones.values()].filter(m => m.raw.parent === null && m.raw.panel === panel.id)
+  const visiblePanels = maximizedPanel
+    ? project.panels.filter(p => p.id === maximizedPanel)
+    : project.panels
 
-    const g = layoutGroup({
-      tasks, milestones: ms, sectionStart, pxPerDay, panelId: panel.id, yBase: PANEL_V_PAD + LABEL_ABOVE_H,
-    })
+  for (const panel of visiblePanels) {
+    const g = (expand && expandPanel === panel.id)
+      ? layoutPanelExpanded(project, panel.id, expand, sectionStart, pxPerDay)
+      : layoutPanelNormal(project, panel.id, sectionStart, pxPerDay)
+
     const height = g.rowCount * ROW_STRIDE + PANEL_V_PAD * 2 + LABEL_ABOVE_H
-
-    // Note: a container's completion milestone is intentionally NOT drawn at its own
-    // level — it only appears as the terminal boundary when you drill into it.
-
     panels.push({
       panelId: panel.id, name: panel.name, color: panel.color,
-      nodes: g.nodes, connectors: g.connectors,
-      yOffset: yCursor, height, width: g.width,
+      nodes: g.nodes, connectors: g.connectors, yOffset: yCursor, height, width: g.width,
     })
     yCursor += height + PANEL_GAP
     maxWidth = Math.max(maxWidth, g.width)
   }
-
   return { panels, width: maxWidth, height: Math.max(0, yCursor - PANEL_GAP), sectionStart }
 }
 
-function buildDrilled(project: Project, drillId: TaskId, pxPerDay: number): LayoutResult {
-  const container = project.tasks.get(drillId)
-  if (!container || container.raw.type !== 'container') return buildTopLevel(project, pxPerDay)
+function rootStartMilestone(panelId: PanelId, at: Date): RuntimeMilestone {
+  return {
+    raw: { id: `__rootstart_${panelId}`, name: 'Start', parent: null, panel: panelId, ownerId: null, prerequisites: [], order: 'a0' },
+    computed: { start: at, end: at, durationDays: 0 },
+  }
+}
 
-  const panelId = topPanelOf(project, container)
+function layoutPanelNormal(project: Project, panelId: PanelId, sectionStart: Date, pxPerDay: number): GroupOutput {
+  const tasks = project.roots.filter(t => t.raw.panel === panelId)
+  const userMs = [...project.milestones.values()].filter(m => m.raw.parent === null && m.raw.panel === panelId)
+  // Every root has a default "Start" milestone that everything originates from.
+  const start = rootStartMilestone(panelId, sectionStart)
+  const override = new Map<NodeId, NodeId[]>()
+  for (const t of tasks) if (t.raw.prerequisites.length === 0) override.set(t.raw.id, [start.raw.id])
+  return layoutGroup({ tasks, milestones: [start, ...userMs], sectionStart, pxPerDay, panelId, yBase: PANEL_V_PAD + LABEL_ABOVE_H, prereqOverride: override })
+}
+
+/**
+ * Expand a container in place: its sibling scope is shown normally, but the
+ * container itself is replaced by its children bounded by start/end milestones.
+ * No graying, no divider — children and siblings share the same y-levels.
+ */
+function layoutPanelExpanded(project: Project, panelId: PanelId, container: RuntimeTask, sectionStart: Date, pxPerDay: number): GroupOutput {
+  const drillId = container.raw.id
+  const scope = container.raw.parent === null
+    ? project.roots.filter(t => t.raw.panel === panelId)
+    : (project.tasks.get(container.raw.parent)?.children ?? [])
+  const scopeMs = [...project.milestones.values()].filter(m => m.raw.parent === container.raw.parent)
+  const siblings = scope.filter(t => t.raw.id !== drillId)
   const children = container.children
-  const start = container.computed?.start ?? earliestStart(children) ?? new Date()
-  const end   = container.computed?.end ?? start
+  const start = container.computed?.start ?? sectionStart
+  const end = container.computed?.end ?? start
 
-  // Synthetic start boundary (= the container's prereq boundary)
   const startMs: RuntimeMilestone = {
-    raw: { id: `__start_${drillId}`, name: `${container.raw.name} · start`, parent: drillId, panel: null, ownerId: null, prerequisites: [], order: 'a0' },
+    raw: { id: `__start_${drillId}`, name: `${container.raw.name} · start`, parent: container.raw.parent, panel: null, ownerId: null, prerequisites: [], order: 'a0' },
     computed: { start, end: start, durationDays: 0 },
   }
-
-  const childMilestones = [...project.milestones.values()].filter(m => m.raw.parent === drillId)
-  const hasRealCompletion = childMilestones.some(m => m.raw.ownerId === drillId)
-
-  // Synthesise the end/completion boundary only if the user hasn't created a real one.
-  const boundary: RuntimeMilestone[] = [startMs]
-  if (!hasRealCompletion) {
-    boundary.push({
-      raw: { id: `__end_${drillId}`, name: container.raw.name, parent: drillId, panel: null, ownerId: drillId, prerequisites: [], order: 'z9' },
-      computed: { start: end, end, durationDays: 0 },
-    })
+  const endMs: RuntimeMilestone = {
+    raw: { id: `__end_${drillId}`, name: container.raw.name, parent: container.raw.parent, panel: null, ownerId: drillId, prerequisites: [], order: 'z9' },
+    computed: { start: end, end, durationDays: 0 },
   }
 
-  const childBase = PANEL_V_PAD + LABEL_ABOVE_H
-  const g = layoutGroup({
-    tasks: children,
-    milestones: [...boundary, ...childMilestones],
-    sectionStart: start, pxPerDay, panelId, yBase: childBase,
+  const childIds = new Set(children.map(c => c.raw.id))
+  const leafChildren = children.filter(c => !children.some(o => o.raw.prerequisites.includes(c.raw.id)))
+
+  // Prerequisite override wiring the boundary milestones into the graph.
+  const override = new Map<NodeId, NodeId[]>()
+  override.set(startMs.raw.id, container.raw.prerequisites.filter(p => scope.some(s => s.raw.id === p) || scopeMs.some(m => m.raw.id === p)))
+  override.set(endMs.raw.id, leafChildren.map(c => c.raw.id))
+  for (const c of children) {
+    const intra = c.raw.prerequisites.filter(p => childIds.has(p))
+    override.set(c.raw.id, intra.length ? intra : [startMs.raw.id])
+  }
+  for (const s of siblings) {
+    if (s.raw.prerequisites.includes(drillId))
+      override.set(s.raw.id, s.raw.prerequisites.map(p => p === drillId ? endMs.raw.id : p))
+  }
+  // At root, everything originates from the default Start milestone.
+  const rootScope = container.raw.parent === null
+  const extraMs: RuntimeMilestone[] = []
+  if (rootScope) {
+    const rs = rootStartMilestone(panelId, sectionStart)
+    extraMs.push(rs)
+    for (const s of siblings) if (s.raw.prerequisites.length === 0) override.set(s.raw.id, [rs.raw.id])
+    if ((override.get(startMs.raw.id) ?? []).length === 0) override.set(startMs.raw.id, [rs.raw.id])
+  }
+
+  return layoutGroup({
+    tasks: [...siblings, ...children],
+    milestones: [...scopeMs, ...extraMs, startMs, endMs],
+    sectionStart, pxPerDay, panelId, yBase: PANEL_V_PAD + LABEL_ABOVE_H, prereqOverride: override,
   })
-
-  let nodes = g.nodes
-  let connectors = g.connectors
-  let bottomRows = g.rowCount
-
-  // Dimmed context: the container's own siblings, shown at their real time positions
-  // (scroll before/after the section to see them) below a divider lane.
-  const siblingScope = container.raw.parent === null
-    ? project.roots.filter(r => r.raw.panel === panelId)
-    : (project.tasks.get(container.raw.parent)?.children ?? [])
-  const siblings = siblingScope.filter(t => t.raw.id !== drillId)
-  let contextTop = 0
-  if (siblings.length > 0) {
-    const ctxBase = childBase + g.rowCount * ROW_STRIDE + ROW_STRIDE   // one blank lane as a divider
-    contextTop = ctxBase - ROW_STRIDE / 2
-    const sg = layoutGroup({
-      tasks: siblings, milestones: [], sectionStart: start, pxPerDay, panelId,
-      yBase: ctxBase, dimmedIds: new Set(siblings.map(s => s.raw.id)),
-    })
-    nodes = [...nodes, ...sg.nodes]
-    connectors = [...connectors, ...sg.connectors]
-    bottomRows = g.rowCount + 1 + sg.rowCount
-  }
-
-  const height = bottomRows * ROW_STRIDE + PANEL_V_PAD * 2 + LABEL_ABOVE_H
-  const panel = project.panels.find(p => p.id === panelId)
-  return {
-    panels: [{
-      panelId, name: container.raw.name, color: panel?.color ?? '#2563eb',
-      nodes, connectors, yOffset: 0, height, width: Math.max(g.width, 400),
-      contextDividerY: siblings.length > 0 ? contextTop : undefined,
-    }],
-    width: Math.max(g.width, 400),
-    height,
-    sectionStart: start,
-  }
 }
 
 function topPanelOf(project: Project, rt: RuntimeTask): PanelId {

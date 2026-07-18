@@ -168,7 +168,9 @@ export interface LayoutNode {
   height: number
   row: number
   panelId: PanelId
-  dimmed?: boolean // sibling shown for context while drilled in
+  dimmed?: boolean       // sibling shown for context while drilled in
+  titleClipX?: number    // absolute x the title must stop before (next milestone)
+  expanded?: boolean     // this container is currently expanded in place
 }
 
 export interface LayoutConnector {

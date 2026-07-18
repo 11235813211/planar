@@ -3,6 +3,7 @@ import { renderAvatars } from './Avatar'
 import { TASK_HEIGHT } from '../engine/layout'
 
 const LABEL_FS  = 12
+const CHAR_W    = LABEL_FS * 0.56
 const SVGNS     = 'http://www.w3.org/2000/svg'
 
 function el<K extends keyof SVGElementTagNameMap>(tag: K): SVGElementTagNameMap[K] {
@@ -89,12 +90,15 @@ export function renderTaskBlock(
     for (const a of renderAvatars(assignees, x, y, w, TASK_HEIGHT)) g.appendChild(a)
   }
 
-  // Name label ABOVE the bar, left-aligned. Because successors staircase down-and-right,
-  // the space above/right of each bar is free, so names can run their natural length
-  // (capped generously). Display-only — editing happens in the click popup.
+  // Name label ABOVE the bar, left-aligned. Truncated so it never runs into the next
+  // milestone line (titleClipX), else capped generously.
   const prefix = raw.type === 'ticket' && raw.ticket ? `${raw.ticket}  ` : ''
+  const labelX = x + 1
+  const maxChars = node.titleClipX != null
+    ? Math.max(1, Math.floor((node.titleClipX - labelX) / CHAR_W))
+    : 44
   const label = el('text')
-  label.setAttribute('x', String(x + 1))
+  label.setAttribute('x', String(labelX))
   label.setAttribute('y', String(y - 5))
   label.setAttribute('text-anchor', 'start')
   label.setAttribute('fill', '#334155')
@@ -103,7 +107,7 @@ export function renderTaskBlock(
   label.setAttribute('pointer-events', 'none')
   label.classList.add('task-label', 'task-name-label')
   label.setAttribute('data-id', raw.id)
-  label.textContent = fitChars(prefix + raw.name, 44)   // cap ~44 chars
+  label.textContent = fitChars(prefix + raw.name, maxChars)
   g.appendChild(label)
 
   // Hover +/- buttons

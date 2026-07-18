@@ -82,6 +82,9 @@ export class GanttView {
   private pickPrereqFor: NodeId | null = null
   private currentSectionStart: Date | null = null
   private dragPanelId: string | null = null
+  private maximizedPanel: string | null = null
+  private msAdd!: HTMLButtonElement
+  private msAddTarget: string | null = null
   private ro: ResizeObserver
 
   constructor(container: HTMLElement, project: Project) {
@@ -108,6 +111,16 @@ export class GanttView {
     this.panelBars = document.createElement('div')
     this.panelBars.className = 'panel-bars'
     container.appendChild(this.panelBars)
+
+    // Cursor-following "+" that appears when hovering near an addable milestone line.
+    this.msAdd = document.createElement('button')
+    this.msAdd.className = 'ms-cursor-add'
+    this.msAdd.textContent = '+'
+    this.msAdd.title = 'Add a task off this milestone'
+    this.msAdd.style.display = 'none'
+    this.msAdd.addEventListener('pointerdown', e => e.stopPropagation())
+    this.msAdd.addEventListener('click', (e) => { e.stopPropagation(); if (this.msAddTarget) this.addTaskOffMilestone(this.msAddTarget) })
+    container.appendChild(this.msAdd)
 
     this.drillStack = [{ id: null, label: project.meta.name }]
     this.bindEvents()
@@ -144,7 +157,7 @@ export class GanttView {
     this.axisG.innerHTML = ''
     this.panelBars.innerHTML = ''
 
-    const layout = buildLayout(this.project, this.drillId, this.pxPerDay)
+    const layout = buildLayout(this.project, this.drillId, this.pxPerDay, this.maximizedPanel)
     this.currentSectionStart = layout.sectionStart
 
     // Background (click to deselect / cancel pick)
@@ -192,21 +205,15 @@ export class GanttView {
     const g = el('g')
     g.setAttribute('transform', `translate(0, ${panel.yOffset})`)
 
+    // When a panel is maximized it fills the viewport height.
+    const bandHeight = this.maximizedPanel ? Math.max(panel.height, this.H - this.dateBarH - 40) : panel.height
+
     // Panel band background
     const band = el('rect')
     band.setAttribute('x', String(-2000)); band.setAttribute('y', '0')
-    band.setAttribute('width', String(panel.width + 4000)); band.setAttribute('height', String(panel.height))
+    band.setAttribute('width', String(panel.width + 4000)); band.setAttribute('height', String(bandHeight))
     band.setAttribute('fill', panel.color); band.setAttribute('opacity', '0.04')
     g.appendChild(band)
-
-    // Dimmed-context divider (drilled view)
-    if (panel.contextDividerY != null) {
-      const div = el('line')
-      div.setAttribute('x1', '-2000'); div.setAttribute('y1', String(panel.contextDividerY))
-      div.setAttribute('x2', String(panel.width + 2000)); div.setAttribute('y2', String(panel.contextDividerY))
-      div.setAttribute('stroke', '#cbd5e1'); div.setAttribute('stroke-dasharray', '2 5'); div.setAttribute('stroke-width', '1')
-      g.appendChild(div)
-    }
 
     const nodeMap = new Map<string, LayoutNode>(panel.nodes.map(n => [n.id, n]))
     for (const p of renderConnectors(panel.connectors, nodeMap)) g.appendChild(p)
@@ -214,12 +221,15 @@ export class GanttView {
     for (const node of panel.nodes) {
       if (node.kind === 'milestone') {
         const name = this.milestoneName(node.id)
-        const canAddPrereq = !node.id.startsWith('__start_')
+        const canAddPrereq = !node.id.startsWith('__start_') && !node.id.startsWith('__end_')
         const flag = renderMilestone(
-          node, name, panel.color, panel.height - PANEL_V_PAD,
+          node, name, panel.color, bandHeight - PANEL_V_PAD,
           canAddPrereq ? () => this.beginPickPrereq(node.id) : undefined,
         )
         if (this.pickPrereqFor === node.id) flag.classList.add('pick-target')
+        // Milestones you can spawn a new task off of (root Start + real milestones).
+        if (node.id.startsWith('__rootstart_') || this.project.milestones.has(node.id))
+          flag.classList.add('ms-addable')
         g.appendChild(flag)
       } else {
         const block = renderTaskBlock(node, this.project, this.selectedId === node.id, {
@@ -332,10 +342,21 @@ export class GanttView {
       bar.dataset.panelId = panel.panelId
       bar.innerHTML = `<span class="panel-bar-name">${panel.name}</span>`
 
-      // Double-click the bar to rename the panel.
-      bar.addEventListener('dblclick', () => this.renamePanel(panel.panelId))
+      // Single click → name/colour popup. Double click → maximize/restore.
+      // (Distinguish via a short timer so the single click doesn't fire on a dblclick.)
+      let clickTimer: ReturnType<typeof setTimeout> | null = null
+      bar.addEventListener('click', (e) => {
+        e.stopPropagation()
+        if (clickTimer) return
+        clickTimer = setTimeout(() => { clickTimer = null; this.openPanelPopup(panel.panelId, bar) }, 220)
+      })
+      bar.addEventListener('dblclick', (e) => {
+        e.stopPropagation()
+        if (clickTimer) { clearTimeout(clickTimer); clickTimer = null }
+        this.toggleMaximizePanel(panel.panelId)
+      })
 
-      if (reorderable) {
+      if (reorderable && !this.maximizedPanel) {
         bar.draggable = true
         bar.addEventListener('dragstart', (e) => { this.dragPanelId = panel.panelId; e.dataTransfer!.effectAllowed = 'move'; bar.classList.add('dragging') })
         bar.addEventListener('dragend', () => { this.dragPanelId = null; bar.classList.remove('dragging') })
@@ -345,19 +366,12 @@ export class GanttView {
           e.preventDefault(); bar.classList.remove('drag-over')
           if (this.dragPanelId && this.dragPanelId !== panel.panelId) this.movePanelBefore(this.dragPanelId, panel.panelId)
         })
-
-        const ctrl = document.createElement('div')
-        ctrl.className = 'panel-bar-ctrl'
-        ctrl.innerHTML = `<button title="Colour"><input type="color" value="${panel.color}" /></button>`
-        const colorInput = ctrl.querySelector<HTMLInputElement>('input[type=color]')!
-        colorInput.addEventListener('input', () => this.recolorPanel(panel.panelId, colorInput.value))
-        bar.appendChild(ctrl)
       }
       inner.appendChild(bar)
     })
 
-    // "+ add panel" button at the very bottom (top level only)
-    if (this.drillId === null) {
+    // "+ add panel" button at the very bottom (top level, not maximized)
+    if (this.drillId === null && !this.maximizedPanel) {
       const add = document.createElement('button')
       add.className = 'panel-add-btn'
       add.textContent = '+'
@@ -368,6 +382,50 @@ export class GanttView {
     }
 
     this.panelBars.appendChild(inner)
+  }
+
+  private toggleMaximizePanel(panelId: string) {
+    this.maximizedPanel = this.maximizedPanel === panelId ? null : panelId
+    this.panY = 20
+    this.render()
+  }
+
+  /** Small popup to rename / recolour a panel (single click on its bar). */
+  private openPanelPopup(panelId: string, barEl: HTMLElement) {
+    const panel = this.project.panels.find(p => p.id === panelId)
+    if (!panel) return
+    document.querySelector('.panel-popup')?.remove()
+    const pop = document.createElement('div')
+    pop.className = 'panel-popup'
+    pop.innerHTML = `
+      <label class="ep-l">Panel name</label>
+      <input class="ep-in" id="pp-name" value="${panel.name.replace(/"/g, '&quot;')}" />
+      <label class="ep-l">Colour</label>
+      <input type="color" id="pp-color" value="${panel.color}" />
+      <div class="ep-foot"><button class="btn ep-del" id="pp-del">Delete panel</button></div>`
+    const r = barEl.getBoundingClientRect()
+    const hostR = this.container.getBoundingClientRect()
+    pop.style.left = `${Math.max(8, r.left - hostR.left - 200)}px`
+    pop.style.top = `${r.top - hostR.top + 4}px`
+    pop.addEventListener('pointerdown', e => e.stopPropagation())
+    pop.addEventListener('click', e => e.stopPropagation())
+    this.container.appendChild(pop)
+
+    const nameIn = pop.querySelector<HTMLInputElement>('#pp-name')!
+    nameIn.addEventListener('input', () => { panel.name = nameIn.value; this.project.dirty = true; barEl.querySelector('.panel-bar-name')!.textContent = panel.name })
+    const colIn = pop.querySelector<HTMLInputElement>('#pp-color')!
+    colIn.addEventListener('input', () => this.recolorPanel(panelId, colIn.value))
+    pop.querySelector('#pp-del')!.addEventListener('click', () => {
+      if (this.project.panels.length <= 1) { alert('Keep at least one panel.'); return }
+      // Move this panel's tasks to the first remaining panel.
+      const fallback = this.project.panels.find(p => p.id !== panelId)!.id
+      for (const rt of this.project.tasks.values()) if (rt.raw.panel === panelId) rt.raw.panel = fallback
+      this.project.panels = this.project.panels.filter(p => p.id !== panelId)
+      this.project.dirty = true; pop.remove(); this.render()
+    })
+    setTimeout(() => nameIn.focus(), 0)
+    const off = (e: PointerEvent) => { if (!pop.contains(e.target as Node)) { pop.remove(); document.removeEventListener('pointerdown', off) } }
+    setTimeout(() => document.addEventListener('pointerdown', off), 0)
   }
 
   // ─── Transform / pan / zoom ───────────────────────────────────────────────────
@@ -399,11 +457,37 @@ export class GanttView {
     this.container.classList.add('panning'); this.container.setPointerCapture(e.pointerId)
   }
   private onPointerMove = (e: PointerEvent) => {
-    if (!this.isPanning) return
-    this.panX += e.clientX - this.last.x
-    this.panY += e.clientY - this.last.y
-    this.last = { x: e.clientX, y: e.clientY }
-    this.lightPan()
+    if (this.isPanning) {
+      this.panX += e.clientX - this.last.x
+      this.panY += e.clientY - this.last.y
+      this.last = { x: e.clientX, y: e.clientY }
+      this.lightPan()
+      return
+    }
+    this.updateMilestoneAddButton(e.clientX, e.clientY)
+  }
+
+  /** Show a "+" on the nearest addable milestone line, following the cursor vertically. */
+  private updateMilestoneAddButton(clientX: number, clientY: number) {
+    const hostR = this.container.getBoundingClientRect()
+    let best: { id: string; x: number; y0: number; y1: number } | null = null
+    this.svg.querySelectorAll('.milestone-flag.ms-addable .milestone-line').forEach(ln => {
+      const r = (ln as SVGLineElement).getBoundingClientRect()
+      const dx = Math.abs(clientX - (r.left + r.width / 2))
+      if (dx < 16 && clientY >= r.top - 4 && clientY <= r.bottom + 4) {
+        best = { id: (ln.parentElement as Element).getAttribute('data-id')!, x: r.left + r.width / 2, y0: r.top, y1: r.bottom }
+      }
+    })
+    if (best) {
+      const b = best as { id: string; x: number; y0: number; y1: number }
+      this.msAddTarget = b.id
+      this.msAdd.style.display = 'flex'
+      this.msAdd.style.left = `${b.x - hostR.left + 6}px`
+      this.msAdd.style.top = `${Math.min(Math.max(clientY, b.y0), b.y1) - hostR.top - 10}px`
+    } else if (this.msAddTarget) {
+      this.msAddTarget = null
+      this.msAdd.style.display = 'none'
+    }
   }
   private onPointerUp = () => { this.isPanning = false; this.container.classList.remove('panning') }
   private onWheel = (e: WheelEvent) => {
@@ -577,9 +661,17 @@ export class GanttView {
     this.render()
   }
 
-  private drillInto(id: TaskId, label: string) {
+  private drillInto(id: TaskId, _label: string) {
     this.closeEdit()
-    this.drillStack.push({ id, label })
+    // Breadcrumb = the container's real ancestry (root → … → id), rebuilt each time
+    // so re-expanding a sibling replaces the path instead of appending to it.
+    const path: Array<{ id: TaskId | null; label: string }> = []
+    let cur: RuntimeTask | undefined = this.project.tasks.get(id)
+    while (cur) {
+      path.unshift({ id: cur.raw.id, label: cur.raw.name })
+      cur = cur.raw.parent ? this.project.tasks.get(cur.raw.parent) : undefined
+    }
+    this.drillStack = [{ id: null, label: this.project.meta.name }, ...path]
     this.drillId = id
     this.panX = 20; this.panY = 20; this.selectedId = null
     this.render(); this.emitBreadcrumb()
@@ -659,10 +751,13 @@ export class GanttView {
       prerequisites = last ? [last.raw.id] : []
     }
 
+    const timing = data.timeMode === 'date'
+      ? { timeMode: 'date' as const, start: data.start ?? startAnchor, end: data.end ?? data.start ?? startAnchor }
+      : { timeMode: 'duration' as const, duration: data.duration, start: startAnchor }
     const base = {
       id, name: data.name, parent: parentId, panel: parentId === null ? panelId : null,
       order, prerequisites, tags: [] as string[],
-      timeMode: 'duration' as const, duration: data.duration, start: startAnchor,
+      ...timing,
       style: data.type === 'container'
         ? { background: '#334155', text: '#f8fafc' }
         : { background: '#1e3a5f', text: '#dbeafe' },
@@ -682,6 +777,46 @@ export class GanttView {
     schedule(this.project)
     this.newlyCreatedId = id
     this.render()
+  }
+
+  /** Create a new root-level task in a panel, off a milestone (opens the add modal). */
+  private addTaskOffMilestone(milestoneId: string) {
+    this.msAdd.style.display = 'none'; this.msAddTarget = null
+    let panelId: string
+    let prereqs: NodeId[]
+    if (milestoneId.startsWith('__rootstart_')) {
+      panelId = milestoneId.slice('__rootstart_'.length)
+      prereqs = []   // originates from Start by default
+    } else {
+      const ms = this.project.milestones.get(milestoneId)
+      if (!ms) return
+      panelId = ms.raw.panel ?? this.project.panels[0]?.id ?? ''
+      prereqs = [milestoneId]
+    }
+    openAddTaskModal((data) => {
+      const id = newTaskId()
+      const roots = this.project.roots.filter(r => r.raw.panel === panelId)
+      const last = roots[roots.length - 1]
+      const order = last ? orderAfter(last.raw.order) : 'a0'
+      const anchor = this.currentSectionStart?.toISOString().split('T')[0] ?? new Date().toISOString().split('T')[0]
+      const timing = data.timeMode === 'date'
+        ? { timeMode: 'date' as const, start: data.start ?? anchor, end: data.end ?? data.start ?? anchor }
+        : { timeMode: 'duration' as const, duration: data.duration, start: anchor }
+      const base = {
+        id, name: data.name, parent: null, panel: panelId, order, prerequisites: prereqs, tags: [] as string[], ...timing,
+        style: data.type === 'container' ? { background: '#334155', text: '#f8fafc' } : { background: '#1e3a5f', text: '#dbeafe' },
+      }
+      const raw = data.type === 'container'
+        ? { ...base, type: 'container' as const }
+        : { ...base, type: 'ticket' as const, assignees: [], status: this.project.columns[0]?.id ?? 'todo', ticket: data.ticket }
+      const rt: RuntimeTask = { raw, children: [], computed: null }
+      this.project.tasks.set(id, rt)
+      this.project.roots.push(rt)
+      this.project.dirty = true
+      schedule(this.project)
+      this.newlyCreatedId = id
+      this.render()
+    }, () => {})
   }
 
   // ─── Milestone prereq picking ─────────────────────────────────────────────────
@@ -754,12 +889,6 @@ export class GanttView {
     this.render()
   }
 
-  private renamePanel(panelId: string) {
-    const p = this.project.panels.find(p => p.id === panelId)
-    if (!p) return
-    const name = prompt('Panel name', p.name)
-    if (name != null && name.trim()) { p.name = name.trim(); this.project.dirty = true; this.render() }
-  }
 
   private recolorPanel(panelId: string, color: string) {
     const p = this.project.panels.find(p => p.id === panelId)

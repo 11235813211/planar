@@ -1,10 +1,14 @@
 import type { TaskType } from '../types'
+import { bindModalEnter } from './modalKit'
 
 export interface NewTaskData {
   name: string
-  duration: number
-  ticket: string | null
   type: TaskType
+  timeMode: 'duration' | 'date'
+  duration: number
+  start: string | null   // ISO (date mode)
+  end: string | null     // ISO (date mode)
+  ticket: string | null
 }
 
 export function openAddTaskModal(
@@ -13,6 +17,7 @@ export function openAddTaskModal(
 ): void {
   const overlay = document.createElement('div')
   overlay.className = 'modal-overlay'
+  const today = new Date().toISOString().slice(0, 10)
 
   overlay.innerHTML = `
     <div class="modal add-task-modal">
@@ -30,8 +35,21 @@ export function openAddTaskModal(
         <input id="atm-name" placeholder="Task name" />
       </div>
       <div class="modal-row">
+        <label>Scheduling</label>
+        <div class="seg" id="atm-mode">
+          <button class="seg-btn active" data-mode="duration">Duration</button>
+          <button class="seg-btn" data-mode="date">Date-fixed</button>
+        </div>
+      </div>
+      <div class="modal-row" id="atm-dur-row">
         <label>Duration (days)</label>
         <input id="atm-dur" type="number" value="7" min="1" />
+      </div>
+      <div class="modal-row" id="atm-date-row" style="display:none">
+        <div style="display:flex;gap:8px">
+          <div style="flex:1"><label>Start</label><input id="atm-start" type="date" value="${today}" /></div>
+          <div style="flex:1"><label>End</label><input id="atm-end" type="date" value="${today}" /></div>
+        </div>
       </div>
       <div class="modal-row" id="atm-ticket-row">
         <label>Ticket (optional)</label>
@@ -45,13 +63,20 @@ export function openAddTaskModal(
   `
 
   document.body.appendChild(overlay)
+  bindModalEnter(overlay)
 
-  const nameInput   = overlay.querySelector<HTMLInputElement>('#atm-name')!
-  const durInput    = overlay.querySelector<HTMLInputElement>('#atm-dur')!
-  const ticketInput = overlay.querySelector<HTMLInputElement>('#atm-ticket')!
-  const ticketRow   = overlay.querySelector<HTMLElement>('#atm-ticket-row')!
-  const typeHint    = overlay.querySelector<HTMLElement>('#atm-typehint')!
+  const $ = <T extends HTMLElement>(s: string) => overlay.querySelector<T>(s)!
+  const nameInput = $<HTMLInputElement>('#atm-name')
+  const durInput = $<HTMLInputElement>('#atm-dur')
+  const startInput = $<HTMLInputElement>('#atm-start')
+  const endInput = $<HTMLInputElement>('#atm-end')
+  const ticketInput = $<HTMLInputElement>('#atm-ticket')
+  const ticketRow = $<HTMLElement>('#atm-ticket-row')
+  const durRow = $<HTMLElement>('#atm-dur-row')
+  const dateRow = $<HTMLElement>('#atm-date-row')
+  const typeHint = $<HTMLElement>('#atm-typehint')
   let type: TaskType = 'ticket'
+  let mode: 'duration' | 'date' = 'duration'
 
   overlay.querySelectorAll<HTMLButtonElement>('#atm-type .seg-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -64,11 +89,19 @@ export function openAddTaskModal(
         : 'A milestone task is a container — double-click drills into its sub-tasks.'
     })
   })
+  overlay.querySelectorAll<HTMLButtonElement>('#atm-mode .seg-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      overlay.querySelectorAll('#atm-mode .seg-btn').forEach(b => b.classList.remove('active'))
+      btn.classList.add('active')
+      mode = btn.dataset.mode as 'duration' | 'date'
+      durRow.style.display = mode === 'duration' ? 'flex' : 'none'
+      dateRow.style.display = mode === 'date' ? 'flex' : 'none'
+    })
+  })
 
   setTimeout(() => nameInput.focus(), 50)
   const close = () => document.body.removeChild(overlay)
-
-  overlay.querySelector('#atm-cancel')!.addEventListener('click', () => { close(); onCancel() })
+  $('#atm-cancel').addEventListener('click', () => { close(); onCancel() })
   overlay.addEventListener('click', (e) => { if (e.target === overlay) { close(); onCancel() } })
 
   const submit = () => {
@@ -77,12 +110,12 @@ export function openAddTaskModal(
     const duration = Math.max(1, parseInt(durInput.value) || 7)
     const ticket = type === 'ticket' ? (ticketInput.value.trim() || null) : null
     close()
-    onConfirm({ name, duration, ticket, type })
+    onConfirm({
+      name, type, timeMode: mode, duration, ticket,
+      start: mode === 'date' ? (startInput.value || today) : null,
+      end: mode === 'date' ? (endInput.value || startInput.value || today) : null,
+    })
   }
-
-  overlay.querySelector('#atm-add')!.addEventListener('click', submit)
-  overlay.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') submit()
-    if (e.key === 'Escape') { close(); onCancel() }
-  })
+  $('#atm-add').addEventListener('click', submit)
+  overlay.addEventListener('keydown', (e) => { if (e.key === 'Escape') { close(); onCancel() } })
 }
